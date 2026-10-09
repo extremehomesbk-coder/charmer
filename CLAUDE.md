@@ -1,4 +1,4 @@
-# <Game name> (working title)
+# Snake Song (working title; repo and pipeline card: Charmer)
 
 Mobile-web game prototype built from the studio template. Not an EHM or Halsey project: none of their data,
 skills or doc routing apply here.

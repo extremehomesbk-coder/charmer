@@ -27,8 +27,16 @@ export class MenuScene extends Phaser.Scene {
         color: CONFIG.colors.textDim,
       })
       .setOrigin(0.5);
+    this.add
+      .text(
+        width / 2,
+        height * 0.42,
+        "Hold a basket to play the flute.\nIts snake lifts the pots above it.\nLine up 3 of a colour to clear them.\nDon't let a lid land on a full basket.",
+        { fontFamily: FONT, fontSize: '16px', color: CONFIG.colors.textDim, align: 'center', lineSpacing: 6 },
+      )
+      .setOrigin(0.5, 0);
     const play = this.add
-      .text(width / 2, height * 0.6, 'TAP TO PLAY', {
+      .text(width / 2, height * 0.68, 'TAP TO PLAY', {
         fontFamily: FONT,
         fontSize: '26px',
         color: CONFIG.colors.text,
@@ -37,14 +45,14 @@ export class MenuScene extends Phaser.Scene {
       .setOrigin(0.5);
     this.tweens.add({ targets: play, alpha: { from: 1, to: 0.35 }, duration: 650, yoyo: true, repeat: -1 });
     this.add
-      .text(width / 2, height * 0.6 + 36, `BEST ${loadSave().best}`, {
+      .text(width / 2, height * 0.68 + 36, `BEST ${loadSave().best}`, {
         fontFamily: FONT,
         fontSize: '15px',
         color: CONFIG.colors.textDim,
       })
       .setOrigin(0.5);
     this.add
-      .text(width / 2, height - CONFIG.layout.safeBottom - 10, 'desktop: arrows move, space acts', {
+      .text(width / 2, height - CONFIG.layout.safeBottom - 10, 'desktop: hold keys 1-5', {
         fontFamily: FONT,
         fontSize: '11px',
         color: CONFIG.colors.textDim,

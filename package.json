@@ -1,5 +1,5 @@
 {
-  "name": "studio-template",
+  "name": "charmer",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -11,8 +11,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test && npm run build"
+    "test": "vitest run src",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test && npm run build",
+    "sim": "vitest run scripts/sim"
   },
   "dependencies": {
     "phaser": "^3.90.0"
