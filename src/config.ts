@@ -4,7 +4,7 @@
  */
 export const CONFIG = {
   title: 'Snake Song',
-  version: '0.1.0',
+  version: '0.2.0',
 
   layout: {
     width: 390, // portrait iPhone design resolution; Phaser FIT scales it to any screen
@@ -17,6 +17,15 @@ export const CONFIG = {
     potWidth: 58,
     potHeight: 46,
     basketHeight: 54,
+    renderScale: 2, // the canvas renders at this multiple of the design size so art and text stay crisp
+  },
+
+  art: {
+    segment: 16, // snake body segment diameter
+    segmentSpacing: 6, // px between segments along the neck
+    headWidth: 40,
+    headHeight: 34,
+    vineHeight: 44,
   },
 
   colors: {
@@ -30,8 +39,10 @@ export const CONFIG = {
     leaf: 0x7ed957,
     basket: 0xb07a3c,
     basketRim: 0xd9a35f,
-    snake: 0x6fbf73,
-    snakeHeld: 0xffd54f,
+    snake: 0x63c95a,
+    snakeHeld: 0xffcf4a,
+    gold: 0xffc93c,
+    fever: 0xd36bff,
     column: 0x1f2333,
     columnHeld: 0x2a3150,
     // one per pot colour; each pot also carries a glyph so colour is never the only cue
@@ -53,13 +64,16 @@ export const CONFIG = {
     dropFactor: 0.88, // drop interval multiplier per stage
     dropMinMs: 900,
     dropBias: 3, // lids favour emptier columns: weight = free slots ^ dropBias (0 = uniform)
+    sparseFill: 0.4, // below this share of slots filled, lids come faster ...
+    sparseFactor: 0.45, // ... down to this share of the interval on an empty board
+    warnMs: 900, // the view shows where the next lid lands this long before it falls
     chainPauseMs: 260, // pause between a clear and the cascade check that follows it
   },
 
   levels: {
     startColors: 3,
     maxColors: 6,
-    colorEveryStages: 2, // one more pot colour every N stages
+    colorEveryStages: 1, // one more pot colour every N stages
     stageTarget: 24, // pots to clear in stage 1
     stageTargetStep: 6, // extra pots per later stage
   },
@@ -68,6 +82,21 @@ export const CONFIG = {
     perPot: 10,
     chainCap: 5, // cascade multiplier cap
     stageBonus: 500,
+    fourBonus: 30, // added before multipliers when a run is 4 long
+    fiveBonus: 80, // ... or 5 long
+  },
+
+  specials: {
+    wildRate: 0.05, // share of lids that are rainbow pots (match any colour)
+    goldRate: 0.05, // share of lids that are gold pots (clear their whole row when matched)
+  },
+
+  fever: {
+    perPot: 0.055, // meter gained per pot cleared (meter full at 1)
+    chainBoost: 0.5, // each cascade step adds this much extra meter per pot
+    decayPerSec: 0.035, // meter drains this much per second outside fever
+    durationMs: 6000, // fever length: lids paused, points multiplied
+    pointsMult: 2,
   },
 
   feel: {
@@ -75,6 +104,13 @@ export const CONFIG = {
     dropFallMs: 220,
     popMs: 260,
     floatTextMs: 700,
+    gravity: 0.0045, // px per ms^2 for falling pots
+    squashMs: 160, // landing squash
+    shakeMs: 140, // camera shake on big clears
+    shake: 0.006, // camera shake intensity (chain 2); scales with chain
+    scoreCountMs: 400, // the score display counts up to the real score over about this long
+    noteEveryMs: 220, // a music note floats up from a charmed basket this often
+    tongueEveryMs: 1400, // an idle snake flicks its tongue this often
     restartGuardMs: 600, // after game over, ignore taps this long so a held finger does not restart
     maxFrameMs: 100, // longest frame step; a background tab must not fast-forward the board
     noteBaseHz: 330, // flute note for column 0; each column a step up the scale

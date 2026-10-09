@@ -97,6 +97,43 @@ export class Sound {
     osc.stop(t + 0.12);
   }
 
+  private tone(type: OscillatorType, from: number, to: number, start: number, len: number, vol: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const t = ctx.currentTime + start;
+    osc.type = type;
+    osc.frequency.setValueAtTime(from, t);
+    osc.frequency.exponentialRampToValueAtTime(to, t + len);
+    gain.gain.setValueAtTime(vol, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + len);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + len + 0.05);
+  }
+
+  /** Gold pot: a bright sweep. */
+  blast(): void {
+    if (!this.context()) return;
+    this.tone('sawtooth', 200, 1600, 0, 0.35, 0.06);
+    this.tone('sine', 900, 1800, 0.05, 0.3, 0.1);
+  }
+
+  /** Fever starts: a quick rising arpeggio. */
+  fanfare(): void {
+    if (!this.context()) return;
+    [0, 4, 7, 12, 16].forEach((st, i) =>
+      this.tone('triangle', this.hz(12 + st), this.hz(12 + st), i * 0.07, 0.22, 0.12),
+    );
+  }
+
+  /** Stage clear. */
+  stage(): void {
+    if (!this.context()) return;
+    [0, 7, 12].forEach((st, i) => this.tone('sine', this.hz(7 + st), this.hz(7 + st), i * 0.1, 0.3, 0.14));
+  }
+
   setMuted(m: boolean): void {
     if (m) this.stopFlute();
     this.muted = m;

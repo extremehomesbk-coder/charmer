@@ -6,8 +6,8 @@ all sound is synthesized.
 
 ## One-line pitch
 
-Hold a basket to play the flute: its snake rises and lifts a stack of pots, and lining up three of a colour
-pops them before the lids fill every basket.
+Hold a basket to play the flute: its snake rises and lifts a stack of glossy pots; line up three of a colour to
+pop them, chain cascades, blast rows with gold pots and hit Fever before the lids fill every basket.
 
 ## The 9-second clip (what a muted vertical video of this game shows)
 
@@ -37,21 +37,28 @@ two stages (3 → 6).
 
 ## Power-ups and modifiers
 
-None in v0.1. Candidates once the core is proven: a golden lid that clears its whole row, a "long note" that
-holds a snake's height for 5 s, a clay lid that only breaks in a cascade.
+v0.2: gold pots (clear their whole row when matched), rainbow wild pots (match any colour), Fever (a meter
+filled by clears and cascades; full = 6 s with no lids and double points), 4- and 5-in-a-row bonuses. Still on
+the list: a "long note" that holds a snake's height for 5 s, a clay lid that only breaks in a cascade.
 
 ## Feel: animations that must read without sound
 
-Snake neck sways while charmed and turns gold; pots ease up and down with the lift; new lids fall from the vine;
-clears ring out in the pot's colour with a floating "+30 x2"; a basket one pot from full pulses red.
+Snake neck sways while charmed, its hood flares and it turns gold; music notes float up from the charmed
+basket and a warm beam lights its lane; pots fall under gravity and squash with a dust puff on landing; a ghost
+of the next lid pulses over its column; clears flash white, burst into shards, sparks and a ring in the pot's
+colour with "+30"; cascades and big runs throw a tilted combo word (NICE! x2, GREAT!, GOLDEN!) and shake the
+screen; gold pots sweep a beam across their row; Fever tints the screen and turns the snakes rainbow; a basket
+one pot from full trembles and its lane pulses red.
 
 ## Theme and art direction
 
-Night market: dark board, woven baskets, a green vine across the top, glossy rounded pots in strong colours
-with a glyph each (circle, triangle, square, diamond, cross, bar) so colour is never the only cue.
+Night market: indigo sky with stars and a crescent moon, domed skyline with glowing lanterns, a red rug,
+woven baskets, a leafy flowering vine, glossy glazed pots with a zigzag band and a cream badge holding a glyph
+(circle, triangle, square, diamond, cross, star) so colour is never the only cue. All painted in code with
+canvas gradients (src/art.ts) and rendered at 2x for a sharp phone screen.
 
 ## Open questions
 
-- Is the top third of the board too empty early on? (rows 10; stacks sit at 2-5 for the first two stages)
+- Is the top third of the board too empty early on? (rows 10; the sparse-board rush in v0.2 helps)
 - Does a one-snake-at-a-time flute feel right, or should two fingers charm two snakes?
 - App Store wrapper: the card says this game also tests the web-to-store pipeline (no Mac; needs a cloud build).
