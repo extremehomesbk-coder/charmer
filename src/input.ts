@@ -40,8 +40,10 @@ export function bindInput(scene: Phaser.Scene, h: InputHandlers, swipeMinPx = 24
 }
 
 /**
- * Press-and-hold input: reports which lane (column) the finger or mouse is holding, following the finger as it
- * slides, and null on release. Keys 1..9 hold lanes on desktop. laneAt maps a world point to a lane or null.
+ * Press-and-hold input: reports which lane the player is holding, following a finger as it slides, and null
+ * when every finger is up. With two thumbs down, the finger that touched (or moved) last wins, and lifting it
+ * hands the flute back to the other one. Keys 1..9 hold lanes on desktop. laneAt maps a world point to a lane
+ * or null.
  */
 export function bindHold(
   scene: Phaser.Scene,
@@ -49,23 +51,33 @@ export function bindHold(
   onHold: (lane: number | null) => void,
   lanes: number,
 ): void {
-  let pointerId: number | null = null;
+  const fingers: { id: number; lane: number }[] = []; // latest last
   const keysDown: number[] = [];
+  const current = () => {
+    if (fingers.length) return fingers[fingers.length - 1].lane;
+    return keysDown.length ? keysDown[keysDown.length - 1] : null;
+  };
+  const press = (id: number, lane: number) => {
+    const i = fingers.findIndex((f) => f.id === id);
+    if (i >= 0) fingers.splice(i, 1);
+    fingers.push({ id, lane });
+    onHold(current());
+  };
   scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
     const lane = laneAt(p.worldX, p.worldY);
-    if (lane === null) return;
-    pointerId = p.id;
-    onHold(lane);
+    if (lane !== null) press(p.id, lane);
   });
   scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
-    if (p.id !== pointerId || !p.isDown) return;
+    const f = fingers.find((x) => x.id === p.id);
+    if (!f || !p.isDown) return;
     const lane = laneAt(p.worldX, p.worldY);
-    if (lane !== null) onHold(lane);
+    if (lane !== null && lane !== f.lane) press(p.id, lane);
   });
   const release = (p: Phaser.Input.Pointer) => {
-    if (p.id !== pointerId) return;
-    pointerId = null;
-    onHold(keysDown.length ? keysDown[keysDown.length - 1] : null);
+    const i = fingers.findIndex((f) => f.id === p.id);
+    if (i < 0) return;
+    fingers.splice(i, 1);
+    onHold(current());
   };
   scene.input.on('pointerup', release);
   scene.input.on('pointerupoutside', release);
@@ -75,13 +87,12 @@ export function bindHold(
     const lane = Number(e.key) - 1;
     if (!Number.isInteger(lane) || lane < 0 || lane >= lanes || keysDown.includes(lane)) return;
     keysDown.push(lane);
-    onHold(lane);
+    onHold(current());
   });
   kb.on('keyup', (e: KeyboardEvent) => {
-    const lane = Number(e.key) - 1;
-    const i = keysDown.indexOf(lane);
+    const i = keysDown.indexOf(Number(e.key) - 1);
     if (i < 0) return;
     keysDown.splice(i, 1);
-    if (pointerId === null) onHold(keysDown.length ? keysDown[keysDown.length - 1] : null);
+    onHold(current());
   });
 }

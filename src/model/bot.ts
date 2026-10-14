@@ -1,28 +1,37 @@
-/** Demo bot for ?auto=1 and the balance tests: charm the column whose lift clears the most pots. */
-import { bestLift, type GameState, type RulesConfig } from './game';
-
 /**
- * With no clear available in one lift, look two lifts ahead: raise one column to set up a clear that a second
- * lift finishes. A raised column sinks slowly enough (sinkMs) that the second lift lands in time.
+ * Demo bot for ?auto=1 and the balance probe: charm the snake closest to the vine, but break off to guard a
+ * lane when its lid would land before that snake could get its head up. It notices a wobbling lid only after
+ * bot.reactMs, like a person would.
  */
-function bestSetup(state: GameState, cfg: RulesConfig): { col: number; lift: number } | null {
-  let best: { col: number; lift: number; gain: number } | null = null;
-  for (let c = 0; c < state.cols.length; c++) {
-    const col = state.cols[c];
-    const highest = Math.min(cfg.board.maxLift, cfg.board.rows - col.pots.length);
-    for (let lift = col.lift + 1; lift <= highest; lift++) {
-      const trial = { ...state, cols: state.cols.map((x, i) => (i === c ? { lift, pots: x.pots } : x)) };
-      const next = bestLift(trial, cfg);
-      if (next && next.col !== c && (!best || next.gain > best.gain)) best = { col: c, lift, gain: next.gain };
-    }
-  }
-  return best;
-}
+import type { GameConfig } from '../config';
+import { riseFor, secondsToReach, warnMsForLevel, type GameState, type RulesConfig } from './game';
 
-export function botChoice(state: GameState, cfg: RulesConfig): number | null {
-  const plan = bestLift(state, cfg);
-  if (plan) return plan.lift > state.cols[plan.col].lift ? plan.col : null;
-  // Raising is the only thing a held column does; lower targets are reached by letting go.
-  const setup = bestSetup(state, cfg);
-  return setup ? setup.col : null;
+type BotConfig = RulesConfig & Pick<GameConfig, 'bot'>;
+
+const MARGIN = 0.04; // guard a little above the minimum so a sinking snake still blocks on impact
+
+export function botChoice(state: GameState, cfg: BotConfig): number | null {
+  const guard = cfg.snakes.guardMin + MARGIN;
+  let urgent: { lane: number; slack: number } | null = null;
+  state.lanes.forEach((pot, lane) => {
+    if (!pot) return;
+    const lid = pot.lid;
+    if (lid.phase === 'wobble' && warnMsForLevel(state.level, cfg) - lid.timer < cfg.bot.reactMs) return;
+    const t = secondsToReach(state, lane, guard, cfg);
+    if (t === null) return;
+    if (pot.h - cfg.snakes[pot.kind].sink * t >= guard) return; // already high enough to take the hit
+    const slack = t - Math.max(0, guard - pot.h) / riseFor(state.level, pot.kind, cfg);
+    if (!urgent || slack < urgent.slack) urgent = { lane, slack };
+  });
+  const u = urgent as { lane: number; slack: number } | null;
+  if (u && u.slack < cfg.bot.slackS) return u.lane;
+
+  let best: number | null = null;
+  let bestTime = Infinity;
+  state.lanes.forEach((pot, lane) => {
+    if (!pot || pot.lid.phase === 'sealed') return;
+    const time = (1 - pot.h) / riseFor(state.level, pot.kind, cfg);
+    if (time < bestTime) [best, bestTime] = [lane, time];
+  });
+  return best;
 }

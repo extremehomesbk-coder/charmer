@@ -5,12 +5,20 @@
  */
 import Phaser from 'phaser';
 import { CONFIG } from './config';
+import type { SnakeKind } from './model/game';
 
 const R = CONFIG.layout.renderScale;
 const L = CONFIG.layout;
 const A = CONFIG.art;
+const C = CONFIG.colors;
+const TAU = Math.PI * 2;
 
 type Ctx = CanvasRenderingContext2D;
+
+export const KINDS: SnakeKind[] = ['green', 'gold', 'sleepy'];
+
+/** [back, belly, pattern] colours of each snake. */
+export const SKIN: Record<SnakeKind, number[]> = { green: C.green, gold: C.goldSkin, sleepy: C.sleepy };
 
 function tex(scene: Phaser.Scene, key: string, w: number, h: number, draw: (ctx: Ctx) => void): void {
   if (scene.textures.exists(key)) return;
@@ -29,14 +37,14 @@ export function hex(c: number): string {
 }
 
 /** Mix a colour toward white (amt > 0) or black (amt < 0). */
-export function shade(c: number, amt: number): string {
+export function shade(c: number, amt: number, alpha = 1): string {
   const r = (c >> 16) & 255;
   const g = (c >> 8) & 255;
   const b = c & 255;
   const t = amt > 0 ? 255 : 0;
   const k = Math.abs(amt);
   const mix = (v: number) => Math.round(v + (t - v) * k);
-  return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+  return `rgba(${mix(r)},${mix(g)},${mix(b)},${alpha})`;
 }
 
 /** Tiny seeded random for decorative scatter, so the art is identical on every load. */
@@ -48,653 +56,1123 @@ function decoRand(seed: number): () => number {
   };
 }
 
-// ---------------------------------------------------------------- pots
-
-function potPath(ctx: Ctx, w: number, h: number): void {
-  const hw = w / 2;
-  const top = -h / 2;
-  const neck = hw * 0.42;
-  ctx.beginPath();
-  ctx.moveTo(-neck, top + 7);
-  ctx.bezierCurveTo(-neck, top + 13, -hw, top + 12, -hw, top + h * 0.5);
-  ctx.bezierCurveTo(-hw, top + h * 0.82, -hw * 0.7, h / 2, 0, h / 2);
-  ctx.bezierCurveTo(hw * 0.7, h / 2, hw, top + h * 0.82, hw, top + h * 0.5);
-  ctx.bezierCurveTo(hw, top + 12, neck, top + 13, neck, top + 7);
-  ctx.closePath();
+function glow(ctx: Ctx, x: number, y: number, r: number, color: string): void {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, color);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x - r, y - r, r * 2, r * 2);
 }
 
-function glyph(ctx: Ctx, kind: number, x: number, y: number, r: number): void {
+function ellipse(ctx: Ctx, x: number, y: number, rx: number, ry: number, fill: string | CanvasGradient): void {
   ctx.beginPath();
-  switch (kind % 6) {
-    case 0:
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      break;
-    case 1:
-      ctx.moveTo(x, y - r);
-      ctx.lineTo(x + r, y + r * 0.8);
-      ctx.lineTo(x - r, y + r * 0.8);
-      break;
-    case 2:
-      ctx.rect(x - r * 0.8, y - r * 0.8, r * 1.6, r * 1.6);
-      break;
-    case 3:
-      ctx.moveTo(x, y - r);
-      ctx.lineTo(x + r, y);
-      ctx.lineTo(x, y + r);
-      ctx.lineTo(x - r, y);
-      break;
-    case 4:
-      ctx.rect(x - r, y - r * 0.32, r * 2, r * 0.64);
-      ctx.rect(x - r * 0.32, y - r, r * 0.64, r * 2);
-      break;
-    default:
-      for (let i = 0; i < 10; i++) {
-        const a = -Math.PI / 2 + (i * Math.PI) / 5;
-        const rr = i % 2 ? r * 0.45 : r;
-        ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+  ctx.ellipse(x, y, rx, ry, 0, 0, TAU);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+// ---------------------------------------------------------------- backdrop
+
+function onionDome(ctx: Ctx, cx: number, y: number, r: number, h: number): void {
+  ctx.beginPath();
+  ctx.moveTo(cx - r * 0.85, y);
+  ctx.bezierCurveTo(cx - r * 1.3, y - h * 0.45, cx - r * 0.25, y - h * 0.68, cx, y - h);
+  ctx.bezierCurveTo(cx + r * 0.25, y - h * 0.68, cx + r * 1.3, y - h * 0.45, cx + r * 0.85, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillRect(cx - 0.8, y - h - 9, 1.6, 10);
+  ctx.beginPath();
+  ctx.arc(cx, y - h - 10, 2, 0, TAU);
+  ctx.fill();
+}
+
+function arch(ctx: Ctx, x: number, y: number, w: number, h: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x, y + w * 0.6);
+  ctx.quadraticCurveTo(x, y, x + w / 2, y - w * 0.15);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + w * 0.6);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** A row of domed buildings and minarets standing on baseY, with some windows lit. */
+function skyline(ctx: Ctx, baseY: number, color: string, lit: number, seed: number, scale: number): void {
+  const rnd = decoRand(seed);
+  const windows: [number, number, number, number][] = [];
+  let x = -14;
+  ctx.fillStyle = color;
+  while (x < L.width + 14) {
+    const kind = rnd();
+    const w = (34 + rnd() * 46) * scale;
+    const h = (34 + rnd() * 64) * scale;
+    const top = baseY - h;
+    if (kind < 0.18) {
+      // minaret
+      const mw = 11 * scale;
+      const mh = h + 70 * scale;
+      ctx.fillRect(x, baseY - mh, mw, mh + 300);
+      ctx.fillRect(x - 3 * scale, baseY - mh * 0.72, mw + 6 * scale, 4 * scale);
+      onionDome(ctx, x + mw / 2, baseY - mh, mw * 0.65, 16 * scale);
+      windows.push([x + mw / 2 - 2 * scale, baseY - mh * 0.55, 4 * scale, 7 * scale]);
+      x += mw + 6 + rnd() * 10;
+      continue;
+    }
+    ctx.fillRect(x, top, w, h + 300);
+    if (kind < 0.62) onionDome(ctx, x + w / 2, top + 1, w * 0.36, w * 0.5);
+    else if (kind < 0.8) {
+      for (let cx = x; cx < x + w - 3; cx += 7 * scale) ctx.fillRect(cx, top - 4 * scale, 4 * scale, 5 * scale);
+    } else {
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, top + 1, w * 0.42, w * 0.22, 0, Math.PI, 0);
+      ctx.fill();
+    }
+    const cols = Math.max(1, Math.floor(w / (13 * scale)));
+    const rows = Math.max(1, Math.floor(h / (22 * scale)));
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (rnd() > lit) continue;
+        const wx = x + ((c + 0.5) * w) / cols - 2.5 * scale;
+        windows.push([wx, top + 10 * scale + r * 22 * scale, 5 * scale, 9 * scale]);
       }
+    }
+    x += w + rnd() * 4;
   }
-  ctx.closePath();
+  for (const [wx, wy, ww, wh] of windows) {
+    glow(ctx, wx + ww / 2, wy + wh / 2, ww * 2.4, 'rgba(255,190,90,0.35)');
+    ctx.fillStyle = '#ffd27a';
+    arch(ctx, wx, wy, ww, wh);
+  }
 }
 
-function potBody(ctx: Ctx, w: number, h: number, light: string, mid: string, dark: string): void {
-  potPath(ctx, w, h);
-  const g = ctx.createRadialGradient(-w * 0.18, -h * 0.12, 2, 0, 0, w * 0.75);
+function palm(ctx: Ctx, x: number, baseY: number, h: number, lean: number, color: string): void {
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(x, baseY);
+  ctx.quadraticCurveTo(x + lean * 0.2, baseY - h * 0.6, x + lean, baseY - h);
+  ctx.stroke();
+  const tx = x + lean;
+  const ty = baseY - h;
+  for (let i = 0; i < 7; i++) {
+    const a = -Math.PI + (i / 6) * Math.PI + (i % 2 ? 0.15 : -0.1);
+    const len = 30 + (i % 3) * 6;
+    const ex = tx + Math.cos(a) * len;
+    const ey = ty + Math.sin(a) * len * 0.55 + 12;
+    ctx.beginPath();
+    ctx.moveTo(tx, ty);
+    ctx.quadraticCurveTo(tx + Math.cos(a) * len * 0.5, ty + Math.sin(a) * len * 0.6 - 10, ex, ey);
+    ctx.quadraticCurveTo(tx + Math.cos(a) * len * 0.55, ty + Math.sin(a) * len * 0.5 - 4, tx, ty + 2);
+    ctx.fill();
+  }
+}
+
+/** A string of paper lanterns sagging between two points. */
+function lanternString(ctx: Ctx, x1: number, y1: number, x2: number, y2: number, sag: number, seed: number): void {
+  const rnd = decoRand(seed);
+  const at = (t: number) => {
+    const x = x1 + (x2 - x1) * t;
+    const y = y1 + (y2 - y1) * t + sag * 4 * t * (1 - t);
+    return [x, y];
+  };
+  ctx.strokeStyle = 'rgba(30,12,40,0.8)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= 30; i++) {
+    const [x, y] = at(i / 30);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  const colors = ['#ff6b4a', '#ffb347', '#ff4f8b', '#4fd1c5', '#ffd166'];
+  for (let t = 0.08; t < 0.95; t += 0.11 + rnd() * 0.04) {
+    const [x, y] = at(t);
+    const c = colors[Math.floor(rnd() * colors.length)];
+    glow(ctx, x, y + 9, 18, 'rgba(255,170,90,0.35)');
+    ctx.fillStyle = 'rgba(30,12,40,0.9)';
+    ctx.fillRect(x - 0.5, y, 1, 4);
+    ellipse(ctx, x, y + 9, 4.5, 6, c);
+    ellipse(ctx, x - 1.3, y + 7.5, 1.5, 3, 'rgba(255,255,255,0.5)');
+    ctx.fillStyle = 'rgba(40,16,30,0.9)';
+    ctx.fillRect(x - 2.5, y + 2.6, 5, 1.6);
+    ctx.fillRect(x - 2.5, y + 14.2, 5, 1.6);
+  }
+}
+
+function background(scene: Phaser.Scene): void {
+  tex(scene, 'bg', L.width, L.height, (ctx) => {
+    const W = L.width;
+    const H = L.height;
+    const sky = ctx.createLinearGradient(0, 0, 0, 640);
+    sky.addColorStop(0, '#120a30');
+    sky.addColorStop(0.3, '#2a1660');
+    sky.addColorStop(0.58, '#5e2a85');
+    sky.addColorStop(0.8, '#b8497f');
+    sky.addColorStop(1, '#ff9f6b');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    const rnd = decoRand(11);
+    for (let i = 0; i < 170; i++) {
+      const x = rnd() * W;
+      const y = rnd() * 430;
+      const r = rnd() * 1.1 + 0.25;
+      ctx.globalAlpha = Math.max(0, 1 - y / 470) * (0.35 + rnd() * 0.65);
+      ellipse(ctx, x, y, r, r, '#ffffff');
+    }
+    ctx.globalAlpha = 1;
+
+    // full moon with a warm halo
+    const mx = 92;
+    const my = 300;
+    glow(ctx, mx, my, 170, 'rgba(255,200,150,0.22)');
+    glow(ctx, mx, my, 70, 'rgba(255,230,190,0.35)');
+    const mg = ctx.createRadialGradient(mx - 12, my - 12, 4, mx, my, 40);
+    mg.addColorStop(0, '#fffbea');
+    mg.addColorStop(0.7, '#ffe6b5');
+    mg.addColorStop(1, '#f4c48e');
+    ellipse(ctx, mx, my, 38, 38, mg);
+    for (const [cx, cy, cr] of [
+      [-12, -8, 7],
+      [10, 6, 9],
+      [-4, 16, 5],
+      [14, -14, 4],
+      [-18, 10, 3.5],
+    ]) {
+      ellipse(ctx, mx + cx, my + cy, cr, cr, 'rgba(214,160,110,0.32)');
+      ellipse(ctx, mx + cx + 0.8, my + cy + 0.8, cr * 0.7, cr * 0.7, 'rgba(255,240,210,0.25)');
+    }
+
+    lanternString(ctx, -10, 452, 190, 470, 26, 3);
+    lanternString(ctx, 170, 470, W + 10, 440, 30, 5);
+    skyline(ctx, 560, '#3b1d63', 0.25, 4, 0.8);
+    palm(ctx, 26, 600, 90, 18, '#2a1248');
+    palm(ctx, 360, 600, 104, -22, '#2a1248');
+    skyline(ctx, 612, '#26103f', 0.2, 9, 1.05);
+
+    // sandstone terrace wall
+    const wallTop = 606;
+    const wg = ctx.createLinearGradient(0, wallTop, 0, 712);
+    wg.addColorStop(0, '#c98656');
+    wg.addColorStop(1, '#7e4430');
+    ctx.fillStyle = wg;
+    ctx.fillRect(0, wallTop, W, 110);
+    ctx.fillStyle = 'rgba(70,25,30,0.45)';
+    for (let x = 8; x < W; x += 39) arch(ctx, x, wallTop + 22, 24, 80);
+    ctx.fillStyle = 'rgba(255,214,150,0.18)';
+    for (let x = 8; x < W; x += 39) ctx.fillRect(x - 3, wallTop + 22, 1.5, 80);
+    const cap = ctx.createLinearGradient(0, wallTop - 6, 0, wallTop + 8);
+    cap.addColorStop(0, '#ffd29a');
+    cap.addColorStop(1, '#b8703f');
+    ctx.fillStyle = cap;
+    ctx.fillRect(0, wallTop - 6, W, 14);
+    ctx.fillStyle = 'rgba(60,20,20,0.35)';
+    ctx.fillRect(0, wallTop + 8, W, 3);
+
+    // the rug
+    const rugTop = 712;
+    const rg = ctx.createLinearGradient(0, rugTop, 0, H);
+    rg.addColorStop(0, '#7a1828');
+    rg.addColorStop(1, '#5a0f1f');
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, rugTop, W, H - rugTop);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(0, rugTop, W, 4);
+    const band = (y: number, h: number) => {
+      ctx.fillStyle = '#e2a640';
+      ctx.fillRect(0, y, W, h);
+      ctx.fillStyle = '#1f6f72';
+      for (let x = 0; x < W + 12; x += 12) {
+        ctx.beginPath();
+        ctx.moveTo(x, y + h / 2);
+        ctx.lineTo(x + 6, y + 1.5);
+        ctx.lineTo(x + 12, y + h / 2);
+        ctx.lineTo(x + 6, y + h - 1.5);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.fillStyle = 'rgba(255,240,200,0.8)';
+      for (let x = 6; x < W + 12; x += 12) ellipse(ctx, x, y + h / 2, 1.2, 1.2, 'rgba(255,240,200,0.9)');
+    };
+    band(rugTop + 10, 11);
+    band(H - 26, 11);
+    // field motifs
+    ctx.fillStyle = 'rgba(30,8,20,0.35)';
+    for (let y = rugTop + 34; y < H - 34; y += 22) {
+      for (let x = ((y / 22) % 2) * 15; x < W + 15; x += 30) {
+        ctx.beginPath();
+        ctx.moveTo(x, y - 7);
+        ctx.lineTo(x + 7, y);
+        ctx.lineTo(x, y + 7);
+        ctx.lineTo(x - 7, y);
+        ctx.closePath();
+        ctx.fill();
+        ellipse(ctx, x, y, 2, 2, 'rgba(240,170,80,0.55)');
+      }
+    }
+    // tassels along the top edge
+    ctx.strokeStyle = 'rgba(255,230,180,0.75)';
+    ctx.lineWidth = 1;
+    for (let x = 3; x < W; x += 6) {
+      ctx.beginPath();
+      ctx.moveTo(x, rugTop + 1);
+      ctx.lineTo(x + 0.5, rugTop + 7);
+      ctx.stroke();
+    }
+    // a little evening haze where the city meets the wall
+    const haze = ctx.createLinearGradient(0, 520, 0, 610);
+    haze.addColorStop(0, 'rgba(255,150,120,0)');
+    haze.addColorStop(1, 'rgba(255,150,120,0.18)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, 520, W, 90);
+  });
+}
+
+// ---------------------------------------------------------------- vine
+
+function leaf(ctx: Ctx, x: number, y: number, len: number, angle: number, light: string, dark: string): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(len * 0.3, -len * 0.38, len * 0.75, -len * 0.3, len, 0);
+  ctx.bezierCurveTo(len * 0.75, len * 0.3, len * 0.3, len * 0.38, 0, 0);
+  const g = ctx.createLinearGradient(0, -len * 0.3, 0, len * 0.3);
   g.addColorStop(0, light);
-  g.addColorStop(0.45, mid);
   g.addColorStop(1, dark);
   ctx.fillStyle = g;
   ctx.fill();
-}
-
-function potFinish(ctx: Ctx, w: number, h: number, rim: string, rimDark: string): void {
-  const top = -h / 2;
-  const neck = (w / 2) * 0.42;
-  // rim lip
-  ctx.beginPath();
-  ctx.ellipse(0, top + 5, neck + 4, 4.5, 0, 0, Math.PI * 2);
-  const rg = ctx.createLinearGradient(0, top, 0, top + 10);
-  rg.addColorStop(0, rim);
-  rg.addColorStop(1, rimDark);
-  ctx.fillStyle = rg;
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(0, top + 4, neck, 2.2, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.fill();
-  // specular highlights
-  ctx.save();
-  potPath(ctx, w, h);
-  ctx.clip();
-  ctx.beginPath();
-  ctx.ellipse(-w * 0.27, -h * 0.02, 4, h * 0.22, -0.25, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(-w * 0.24, -h * 0.26, 2.2, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.8)';
-  ctx.fill();
-  // bottom shade
-  const sg = ctx.createLinearGradient(0, h * 0.15, 0, h / 2);
-  sg.addColorStop(0, 'rgba(0,0,0,0)');
-  sg.addColorStop(1, 'rgba(0,0,0,0.35)');
-  ctx.fillStyle = sg;
-  ctx.fillRect(-w / 2, h * 0.15, w, h / 2);
-  ctx.restore();
-  potPath(ctx, w, h);
-  ctx.lineWidth = 1.2;
-  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.strokeStyle = 'rgba(20,60,20,0.6)';
+  ctx.lineWidth = 0.8;
   ctx.stroke();
-}
-
-function zigzag(ctx: Ctx, w: number, y: number, color: string): void {
-  ctx.save();
   ctx.beginPath();
-  const half = w / 2 - 4;
-  for (let x = -half, i = 0; x <= half; x += 5, i++) ctx.lineTo(x, y + (i % 2 ? 2.5 : -2.5));
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.6;
+  ctx.moveTo(1, 0);
+  ctx.lineTo(len * 0.85, 0);
+  ctx.strokeStyle = 'rgba(220,255,200,0.55)';
   ctx.stroke();
   ctx.restore();
 }
 
-function emboss(ctx: Ctx, kind: number, x: number, y: number, r: number, dark: string, light: string): void {
-  glyph(ctx, kind, x + 0.8, y + 1, r);
-  ctx.fillStyle = dark;
-  ctx.fill();
-  glyph(ctx, kind, x, y, r);
-  ctx.fillStyle = light;
-  ctx.fill();
-}
-
-/** A cream disc with the colour's glyph, so each colour also reads by shape. */
-function badge(ctx: Ctx, kind: number, x: number, y: number, c: number): void {
-  ctx.beginPath();
-  ctx.arc(x, y, 9, 0, Math.PI * 2);
-  const g = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, 9);
-  g.addColorStop(0, '#fffdf3');
-  g.addColorStop(1, '#e9dcc0');
-  ctx.fillStyle = g;
-  ctx.fill();
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = shade(c, -0.5);
-  ctx.stroke();
-  glyph(ctx, kind, x, y + (kind % 6 === 1 ? 0.5 : 0), 5);
-  ctx.fillStyle = shade(c, -0.35);
-  ctx.fill();
-}
-
-function potTextures(scene: Phaser.Scene): void {
-  const w = L.potWidth;
-  const h = L.potHeight;
-  const pad = 4;
-  CONFIG.colors.pots.forEach((c, i) => {
-    tex(scene, `pot${i}`, w + pad * 2, h + pad * 2, (ctx) => {
-      ctx.translate(w / 2 + pad, h / 2 + pad);
-      potBody(ctx, w, h, shade(c, 0.55), hex(c), shade(c, -0.55));
-      zigzag(ctx, w, -h * 0.12, shade(c, 0.5));
-      badge(ctx, i, 0, h * 0.14, c);
-      potFinish(ctx, w, h, shade(c, 0.3), shade(c, -0.4));
-    });
-    // Gold pot: gilded body, the colour set in as a gem.
-    tex(scene, `gold${i}`, w + pad * 2, h + pad * 2, (ctx) => {
-      ctx.translate(w / 2 + pad, h / 2 + pad);
-      potBody(ctx, w, h, '#fff6c2', '#f2b416', '#7a4a00');
-      zigzag(ctx, w, -h * 0.14, 'rgba(255,255,255,0.7)');
-      zigzag(ctx, w, h * 0.36, 'rgba(122,74,0,0.6)');
-      ctx.beginPath();
-      ctx.arc(0, h * 0.12, 10, 0, Math.PI * 2);
-      const gg = ctx.createRadialGradient(-3, h * 0.12 - 3, 1, 0, h * 0.12, 11);
-      gg.addColorStop(0, shade(c, 0.7));
-      gg.addColorStop(0.5, hex(c));
-      gg.addColorStop(1, shade(c, -0.6));
-      ctx.fillStyle = gg;
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#fff1a8';
-      ctx.stroke();
-      glyph(ctx, i, 0, h * 0.12, 5);
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
-      ctx.fill();
-      potFinish(ctx, w, h, '#fff1a8', '#a86e00');
-    });
-  });
-  // Wild pot: rainbow glaze with a star.
-  tex(scene, 'wild', w + pad * 2, h + pad * 2, (ctx) => {
-    ctx.translate(w / 2 + pad, h / 2 + pad);
-    potPath(ctx, w, h);
-    const lg = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
-    CONFIG.colors.pots.forEach((c, i, all) => lg.addColorStop(i / (all.length - 1), hex(c)));
-    ctx.fillStyle = lg;
-    ctx.fill();
+function jasmine(ctx: Ctx, x: number, y: number, r: number, petal: string): void {
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * TAU - Math.PI / 2;
     ctx.save();
-    potPath(ctx, w, h);
-    ctx.clip();
-    const rg = ctx.createRadialGradient(-w * 0.18, -h * 0.12, 2, 0, 0, w * 0.75);
-    rg.addColorStop(0, 'rgba(255,255,255,0.55)');
-    rg.addColorStop(0.5, 'rgba(255,255,255,0)');
-    rg.addColorStop(1, 'rgba(0,0,0,0.45)');
-    ctx.fillStyle = rg;
-    ctx.fillRect(-w, -h, w * 2, h * 2);
+    ctx.translate(x + Math.cos(a) * r * 0.55, y + Math.sin(a) * r * 0.55);
+    ctx.rotate(a);
+    ellipse(ctx, 0, 0, r * 0.6, r * 0.38, petal);
     ctx.restore();
-    emboss(ctx, 5, 0, h * 0.1, 11, 'rgba(60,0,80,0.5)', '#ffffff');
-    potFinish(ctx, w, h, '#ffffff', '#9a7bd6');
-  });
+  }
+  ellipse(ctx, x, y, r * 0.28, r * 0.28, '#ffcc33');
 }
 
-// ---------------------------------------------------------------- snake
-
-function snakeTextures(scene: Phaser.Scene): void {
-  const s = A.segment;
-  tex(scene, 'seg', s, s, (ctx) => {
-    const r = s / 2;
-    ctx.translate(r, r);
-    const g = ctx.createRadialGradient(-r * 0.35, -r * 0.35, 1, 0, 0, r);
-    g.addColorStop(0, '#ffffff');
-    g.addColorStop(0.25, '#e8e8e8');
-    g.addColorStop(1, '#6d6d6d');
-    ctx.beginPath();
-    ctx.arc(0, 0, r - 0.5, 0, Math.PI * 2);
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.28)';
-    ctx.lineWidth = 1;
-    for (let i = -1; i <= 1; i++) {
-      ctx.beginPath();
-      ctx.arc(i * r * 0.55, -r * 0.1, r * 0.38, 0.15 * Math.PI, 0.85 * Math.PI);
-      ctx.stroke();
-    }
-  });
-  const hw = A.headWidth;
-  const hh = A.headHeight;
-  tex(scene, 'head', hw, hh, (ctx) => {
-    ctx.translate(hw / 2, hh / 2);
-    // hood
-    ctx.beginPath();
-    ctx.ellipse(0, 3, hw / 2 - 1, hh / 2 - 2, 0, 0, Math.PI * 2);
-    const hg = ctx.createRadialGradient(0, 0, 2, 0, 3, hw / 2);
-    hg.addColorStop(0, '#d9d9d9');
-    hg.addColorStop(1, '#5e5e5e');
-    ctx.fillStyle = hg;
-    ctx.fill();
-    // hood mark
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(-6, 7, 4, 0, Math.PI * 2);
-    ctx.moveTo(10, 7);
-    ctx.arc(6, 7, 4, 0, Math.PI * 2);
-    ctx.stroke();
-    // face
-    ctx.beginPath();
-    ctx.ellipse(0, -2, hw * 0.27, hh * 0.36, 0, 0, Math.PI * 2);
-    const fg = ctx.createRadialGradient(-3, -6, 1, 0, -2, hw * 0.3);
-    fg.addColorStop(0, '#ffffff');
-    fg.addColorStop(1, '#9a9a9a');
-    ctx.fillStyle = fg;
-    ctx.fill();
-    // eyes
-    for (const x of [-5, 5]) {
-      ctx.beginPath();
-      ctx.ellipse(x, -5, 3.4, 4, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffe14d';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(x, -5, 1, 3.2, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#111';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x - 1, -6.5, 0.9, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff';
-      ctx.fill();
-    }
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(-2.5, 3, 1.4, 1.4);
-    ctx.fillRect(1.1, 3, 1.4, 1.4);
-  });
-  tex(scene, 'tongue', 10, 14, (ctx) => {
-    ctx.strokeStyle = '#ff3b5c';
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(5, 0);
-    ctx.lineTo(5, 9);
-    ctx.lineTo(2, 13);
-    ctx.moveTo(5, 9);
-    ctx.lineTo(8, 13);
-    ctx.stroke();
-  });
+/** The vine's centre line, local to the vine texture (35 = CONFIG.layout.vineY). */
+export function vineCurve(x: number): number {
+  return 35 + Math.sin(x / 40) * 2.5;
 }
 
-// ---------------------------------------------------------------- baskets, lanes, vine
-
-function basketTextures(scene: Phaser.Scene, pitch: number): void {
-  const w = pitch - 6;
-  const h = L.basketHeight;
-  tex(scene, 'basketBack', w, 20, (ctx) => {
-    ctx.beginPath();
-    ctx.ellipse(w / 2, 10, w / 2 - 4, 7, 0, 0, Math.PI * 2);
-    const g = ctx.createRadialGradient(w / 2, 12, 2, w / 2, 10, w / 2);
-    g.addColorStop(0, '#0b0603');
-    g.addColorStop(1, '#3a2312');
-    ctx.fillStyle = g;
-    ctx.fill();
-  });
-  tex(scene, 'basket', w, h + 8, (ctx) => {
-    const top = 6;
-    const inset = 9;
-    const body = () => {
-      ctx.beginPath();
-      ctx.moveTo(2, top);
-      ctx.lineTo(w - 2, top);
-      ctx.quadraticCurveTo(w - inset + 2, top + h * 0.7, w - inset, top + h);
-      ctx.lineTo(inset, top + h);
-      ctx.quadraticCurveTo(inset - 2, top + h * 0.7, 2, top);
-      ctx.closePath();
-    };
-    body();
-    const g = ctx.createLinearGradient(0, 0, w, 0);
-    g.addColorStop(0, '#6e4219');
-    g.addColorStop(0.35, '#d39a52');
-    g.addColorStop(0.65, '#c0843d');
-    g.addColorStop(1, '#5b3413');
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.save();
-    body();
-    ctx.clip();
-    // weave: offset brick rows with a light top edge
-    const rowH = 7;
-    for (let r = 0, y = top + 3; y < top + h; r++, y += rowH) {
-      for (let x = (r % 2) * 6 - 6; x < w; x += 12) {
-        ctx.fillStyle = 'rgba(0,0,0,0.22)';
-        ctx.fillRect(x, y + rowH - 2, 11, 2);
-        ctx.fillStyle = 'rgba(255,230,180,0.25)';
-        ctx.fillRect(x + 1, y, 9, 1.4);
-        ctx.fillStyle = 'rgba(0,0,0,0.25)';
-        ctx.fillRect(x + 11, y, 1, rowH);
-      }
+function vine(scene: Phaser.Scene): void {
+  tex(scene, 'vine', L.width, 70, (ctx) => {
+    const W = L.width;
+    const rnd = decoRand(21);
+    for (let x = -6; x < W + 6; x += 13) {
+      const up = Math.floor(x / 13) % 2 === 0;
+      leaf(
+        ctx,
+        x,
+        vineCurve(x) + (up ? -3 : 3),
+        15 + rnd() * 6,
+        (up ? -1 : 1) * (0.5 + rnd() * 0.5),
+        '#5fbf4f',
+        '#24692b',
+      );
     }
-    const sg = ctx.createLinearGradient(0, top + h * 0.5, 0, top + h);
-    sg.addColorStop(0, 'rgba(0,0,0,0)');
-    sg.addColorStop(1, 'rgba(0,0,0,0.35)');
-    ctx.fillStyle = sg;
-    ctx.fillRect(0, top, w, h);
-    ctx.restore();
-    // braided rim
-    ctx.beginPath();
-    ctx.ellipse(w / 2, top, w / 2 - 1, 5, 0, 0, Math.PI);
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = '#e7b56c';
-    ctx.stroke();
-    ctx.lineWidth = 1.2;
-    ctx.strokeStyle = 'rgba(90,50,15,0.8)';
-    for (let i = 0; i <= 14; i++) {
-      const a = (i / 14) * Math.PI;
-      const x = w / 2 + Math.cos(a) * (w / 2 - 1);
-      const y = top + Math.sin(a) * 5;
+    for (const [phase, color, light] of [
+      [0, '#285e22', '#4c9a3c'],
+      [Math.PI, '#33752b', '#6cc052'],
+    ] as const) {
       ctx.beginPath();
-      ctx.moveTo(x - 2, y - 3);
-      ctx.lineTo(x + 2, y + 3);
-      ctx.stroke();
-    }
-  });
-}
-
-function laneTextures(scene: Phaser.Scene, pitch: number, height: number): void {
-  const w = pitch - 6;
-  tex(scene, 'lane', w, height, (ctx) => {
-    const g = ctx.createLinearGradient(0, 0, 0, height);
-    g.addColorStop(0, 'rgba(255,255,255,0.015)');
-    g.addColorStop(1, 'rgba(255,255,255,0.07)');
-    ctx.beginPath();
-    ctx.roundRect(1, 0, w - 2, height, 10);
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  });
-  tex(scene, 'beam', w, height, (ctx) => {
-    const g = ctx.createLinearGradient(0, height, 0, 0);
-    g.addColorStop(0, 'rgba(255,214,110,0.55)');
-    g.addColorStop(0.5, 'rgba(255,190,80,0.16)');
-    g.addColorStop(1, 'rgba(255,190,80,0)');
-    ctx.beginPath();
-    ctx.roundRect(1, 0, w - 2, height, 10);
-    ctx.fillStyle = g;
-    ctx.fill();
-  });
-  tex(scene, 'danger', w, height, (ctx) => {
-    ctx.beginPath();
-    ctx.roundRect(2, 2, w - 4, height - 4, 10);
-    ctx.strokeStyle = 'rgba(255,70,70,0.9)';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = '#ff3030';
-    ctx.shadowBlur = 10;
-    ctx.stroke();
-  });
-}
-
-function vineTexture(scene: Phaser.Scene): void {
-  const w = L.width;
-  const h = A.vineHeight;
-  tex(scene, 'vine', w, h, (ctx) => {
-    const mid = h / 2;
-    const stem = (amp: number, phase: number, width: number, color: string) => {
-      ctx.beginPath();
-      for (let x = -4; x <= w + 4; x += 4) {
-        const y = mid + Math.sin(x / 34 + phase) * amp;
+      for (let x = -4; x <= W + 4; x += 2) {
+        const y = vineCurve(x) + Math.sin(x / 13 + phase) * 3.6;
         if (x === -4) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
-      ctx.lineWidth = width;
-      ctx.strokeStyle = color;
       ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 7;
       ctx.stroke();
-    };
-    stem(5, 0, 9, '#1d4a1f');
-    stem(5, 0, 6, '#3f8f3a');
-    stem(4, 2.2, 4, '#2b6b2c');
-    stem(5, 0, 1.5, 'rgba(200,255,170,0.5)');
-    const rnd = decoRand(7);
-    for (let x = 10; x < w; x += 26) {
-      const y = mid + Math.sin(x / 34) * 5;
-      const up = rnd() > 0.5 ? -1 : 1;
-      const len = 12 + rnd() * 8;
       ctx.save();
-      ctx.translate(x, y);
-      ctx.rotate(up * (0.5 + rnd() * 0.6));
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.quadraticCurveTo(len * 0.5, -len * 0.45, len, 0);
-      ctx.quadraticCurveTo(len * 0.5, len * 0.45, 0, 0);
-      const lg = ctx.createLinearGradient(0, 0, len, 0);
-      lg.addColorStop(0, '#2f7a2c');
-      lg.addColorStop(1, '#8ee36a');
-      ctx.fillStyle = lg;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(1, 0);
-      ctx.lineTo(len - 2, 0);
-      ctx.strokeStyle = 'rgba(20,60,20,0.6)';
-      ctx.lineWidth = 0.8;
+      ctx.translate(0, -1.6);
+      ctx.strokeStyle = light;
+      ctx.lineWidth = 2;
       ctx.stroke();
       ctx.restore();
-      if (rnd() > 0.7) {
-        for (let k = 0; k < 5; k++) {
-          const a = (k / 5) * Math.PI * 2;
-          ctx.beginPath();
-          ctx.arc(x + 6 + Math.cos(a) * 3, y - up * 7 + Math.sin(a) * 3, 2.4, 0, Math.PI * 2);
-          ctx.fillStyle = '#ffd1ec';
-          ctx.fill();
-        }
-        ctx.beginPath();
-        ctx.arc(x + 6, y - up * 7, 1.8, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffcf3c';
-        ctx.fill();
+    }
+    // tendril curls
+    ctx.strokeStyle = '#4c9a3c';
+    ctx.lineWidth = 1.2;
+    for (let x = 30; x < W; x += 74) {
+      ctx.beginPath();
+      for (let t = 0; t < 14; t += 0.3) {
+        const r = 7 - t * 0.45;
+        const px = x + Math.cos(t) * r;
+        const py = vineCurve(x) - 12 + Math.sin(t) * r * 0.8;
+        if (t === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
       }
+      ctx.stroke();
+    }
+    for (let x = 4; x < W + 6; x += 13) {
+      const up = Math.floor(x / 13) % 2 === 1;
+      if (rnd() < 0.55)
+        leaf(
+          ctx,
+          x,
+          vineCurve(x) + (up ? -2 : 2),
+          13 + rnd() * 5,
+          (up ? -1 : 1) * (2.2 + rnd() * 0.5),
+          '#7ad65f',
+          '#2f8236',
+        );
+    }
+    for (let x = 18; x < W; x += 34 + rnd() * 30) {
+      jasmine(ctx, x, vineCurve(x) - 4 + rnd() * 8, 5, rnd() < 0.5 ? '#fff6fb' : '#ffd1e8');
     }
   });
 }
 
-// ---------------------------------------------------------------- backdrop and particles
-
-function backgroundTexture(scene: Phaser.Scene, rimY: number): void {
-  const w = L.width;
-  const h = L.height;
-  tex(scene, 'bg', w, h, (ctx) => {
-    const g = ctx.createLinearGradient(0, 0, 0, h);
-    g.addColorStop(0, '#120a2e');
-    g.addColorStop(0.45, '#1d1146');
-    g.addColorStop(0.8, '#2a1240');
-    g.addColorStop(1, '#170a1e');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, w, h);
-    const rnd = decoRand(11);
-    for (let i = 0; i < 90; i++) {
-      ctx.beginPath();
-      ctx.arc(rnd() * w, rnd() * h * 0.7, rnd() * 1.2 + 0.2, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255,255,255,${0.2 + rnd() * 0.6})`;
-      ctx.fill();
-    }
-    // moon
-    const mx = w * 0.8;
-    const my = 92;
-    const mg = ctx.createRadialGradient(mx, my, 10, mx, my, 90);
-    mg.addColorStop(0, 'rgba(255,230,180,0.35)');
-    mg.addColorStop(1, 'rgba(255,230,180,0)');
-    ctx.fillStyle = mg;
-    ctx.fillRect(mx - 90, my - 90, 180, 180);
+/** The curl of vine a lid hangs from. */
+function tendril(scene: Phaser.Scene): void {
+  tex(scene, 'tendril', 16, 22, (ctx) => {
+    ctx.strokeStyle = '#3f8a35';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.arc(mx, my, 22, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff1cf';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(mx + 9, my - 5, 19, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(29,17,70,0.9)';
-    ctx.fill();
-    // market skyline behind the baskets
-    ctx.fillStyle = '#26103a';
-    const base = rimY + 10;
-    const dome = (x: number, r: number, hgt: number) => {
-      ctx.fillRect(x - r, base - hgt, r * 2, hgt);
-      ctx.beginPath();
-      ctx.arc(x, base - hgt, r, Math.PI, 0);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(x - 2, base - hgt - r);
-      ctx.lineTo(x, base - hgt - r - 12);
-      ctx.lineTo(x + 2, base - hgt - r);
-      ctx.fill();
-    };
-    dome(40, 22, 70);
-    dome(120, 16, 110);
-    dome(205, 30, 60);
-    dome(290, 18, 95);
-    dome(360, 26, 75);
-    // lantern string glow
-    for (let i = 0; i < 9; i++) {
-      const x = 20 + i * 44;
-      const y = base - 40 - Math.sin(i * 1.3) * 18;
-      const lg = ctx.createRadialGradient(x, y, 1, x, y, 26);
-      lg.addColorStop(0, 'rgba(255,170,70,0.55)');
-      lg.addColorStop(1, 'rgba(255,170,70,0)');
-      ctx.fillStyle = lg;
-      ctx.fillRect(x - 26, y - 26, 52, 52);
-      ctx.beginPath();
-      ctx.ellipse(x, y, 4, 6, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffb347';
-      ctx.fill();
-    }
-    // rug under the baskets
-    const ry = rimY + L.basketHeight - 8;
-    const rug = ctx.createLinearGradient(0, ry, 0, h);
-    rug.addColorStop(0, '#7a1f2b');
-    rug.addColorStop(1, '#3d0d18');
-    ctx.fillStyle = rug;
-    ctx.fillRect(0, ry, w, h - ry);
-    for (let y = ry + 8; y < h; y += 18) {
-      ctx.fillStyle = 'rgba(255,190,90,0.18)';
-      ctx.fillRect(0, y, w, 2);
-      for (let x = 8; x < w; x += 24) {
-        ctx.beginPath();
-        ctx.moveTo(x, y + 9);
-        ctx.lineTo(x + 5, y + 5);
-        ctx.lineTo(x + 10, y + 9);
-        ctx.lineTo(x + 5, y + 13);
-        ctx.closePath();
-        ctx.fillStyle = 'rgba(255,200,120,0.14)';
-        ctx.fill();
-      }
-    }
-    const vg = ctx.createRadialGradient(w / 2, h / 2, h * 0.3, w / 2, h / 2, h * 0.75);
-    vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, 'rgba(0,0,0,0.55)');
-    ctx.fillStyle = vg;
-    ctx.fillRect(0, 0, w, h);
-  });
-}
-
-function particleTextures(scene: Phaser.Scene): void {
-  tex(scene, 'shard', 12, 12, (ctx) => {
-    ctx.beginPath();
-    ctx.moveTo(6, 0);
-    ctx.lineTo(12, 6);
-    ctx.lineTo(6, 12);
-    ctx.lineTo(0, 6);
-    ctx.closePath();
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-  });
-  tex(scene, 'spark', 28, 28, (ctx) => {
-    const g = ctx.createRadialGradient(14, 14, 0, 14, 14, 14);
-    g.addColorStop(0, 'rgba(255,255,255,1)');
-    g.addColorStop(0.25, 'rgba(255,255,255,0.6)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 28, 28);
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(14, 0);
-    ctx.lineTo(15.5, 12.5);
-    ctx.lineTo(28, 14);
-    ctx.lineTo(15.5, 15.5);
-    ctx.lineTo(14, 28);
-    ctx.lineTo(12.5, 15.5);
-    ctx.lineTo(0, 14);
-    ctx.lineTo(12.5, 12.5);
-    ctx.closePath();
-    ctx.fill();
-  });
-  tex(scene, 'glow', 64, 64, (ctx) => {
-    const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-    g.addColorStop(0, 'rgba(255,255,255,0.9)');
-    g.addColorStop(0.4, 'rgba(255,255,255,0.3)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 64, 64);
-  });
-  tex(scene, 'ring', 64, 64, (ctx) => {
-    ctx.beginPath();
-    ctx.arc(32, 32, 28, 0, Math.PI * 2);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 4;
-    ctx.shadowColor = '#ffffff';
-    ctx.shadowBlur = 6;
+    ctx.moveTo(8, 0);
+    ctx.bezierCurveTo(14, 6, 2, 10, 8, 16);
+    ctx.lineTo(8, 21);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(190,255,160,0.6)';
+    ctx.lineWidth = 0.8;
     ctx.stroke();
   });
-  tex(scene, 'note', 22, 26, (ctx) => {
-    ctx.fillStyle = '#ffffff';
+}
+
+/** The flower a charmed snake leaves on the vine, one per colour of snake. */
+function blooms(scene: Phaser.Scene): void {
+  const petals: Record<SnakeKind, [string, string]> = {
+    green: ['#ffb3d9', '#e0357d'],
+    gold: ['#fff1a8', '#f29a12'],
+    sleepy: ['#d6dcff', '#6a5cff'],
+  };
+  for (const kind of KINDS) {
+    const [light, dark] = petals[kind];
+    tex(scene, `bloom_${kind}`, 40, 40, (ctx) => {
+      ctx.translate(20, 20);
+      for (let ring = 0; ring < 2; ring++) {
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * TAU + ring * 0.52;
+          const r = ring ? 9 : 13;
+          ctx.save();
+          ctx.rotate(a);
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.bezierCurveTo(r * 0.5, -r * 0.9, r * 1.3, -r * 0.6, r * 1.45, 0);
+          ctx.bezierCurveTo(r * 1.3, r * 0.6, r * 0.5, r * 0.9, 0, 0);
+          const g = ctx.createLinearGradient(0, 0, r * 1.45, 0);
+          g.addColorStop(0, dark);
+          g.addColorStop(1, light);
+          ctx.fillStyle = g;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(80,10,40,0.35)';
+          ctx.lineWidth = 0.7;
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+      ellipse(ctx, 0, 0, 4.5, 4.5, '#ffd84a');
+      for (let i = 0; i < 7; i++) {
+        const a = (i / 7) * TAU;
+        ellipse(ctx, Math.cos(a) * 3.2, Math.sin(a) * 3.2, 1, 1, '#a35a00');
+      }
+    });
+  }
+}
+
+// ---------------------------------------------------------------- pots and lids
+
+interface PotLook {
+  light: string;
+  mid: string;
+  dark: string;
+  rim: string;
+  rimDark: string;
+  band: string;
+  ink: string;
+}
+
+const POT_LOOK: Record<SnakeKind, PotLook> = {
+  green: {
+    light: '#f7b07a',
+    mid: '#d06a36',
+    dark: '#7a3016',
+    rim: '#f2a26b',
+    rimDark: '#8a3a1c',
+    band: '#fbe3bd',
+    ink: '#1f8f8a',
+  },
+  gold: {
+    light: '#fff6c4',
+    mid: '#e8a821',
+    dark: '#7a4800',
+    rim: '#ffe68a',
+    rimDark: '#9a6200',
+    band: '#fff1b8',
+    ink: '#c0392b',
+  },
+  sleepy: {
+    light: '#9fb4ff',
+    mid: '#3c4fc4',
+    dark: '#1b2266',
+    rim: '#8ea4ff',
+    rimDark: '#1f2a7a',
+    band: '#e4e9ff',
+    ink: '#f5c542',
+  },
+};
+
+const RIM_RX = 26;
+const RIM_RY = 7;
+const RIM_Y = 7; // rim ellipse centre, local to the pot texture's top
+const HOLE_RX = 20;
+const HOLE_RY = 4.4;
+
+function potPath(ctx: Ctx): void {
+  ctx.beginPath();
+  ctx.moveTo(-20, 11);
+  ctx.bezierCurveTo(-19, 22, -33, 30, -33, 52);
+  ctx.bezierCurveTo(-33, 70, -26, 80, -20, 83);
+  ctx.quadraticCurveTo(0, 86.5, 20, 83);
+  ctx.bezierCurveTo(26, 80, 33, 70, 33, 52);
+  ctx.bezierCurveTo(33, 30, 19, 22, 20, 11);
+  ctx.closePath();
+}
+
+function potBand(ctx: Ctx, kind: SnakeKind, look: PotLook): void {
+  ctx.fillStyle = look.band;
+  ctx.fillRect(-40, 33, 80, 13);
+  ctx.fillStyle = look.ink;
+  if (kind === 'sleepy') {
+    // moons and stars
+    for (let x = -30; x <= 30; x += 15) {
+      ctx.beginPath();
+      ctx.arc(x, 39.5, 4.2, 0, TAU);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + 1.8, 38.5, 3.6, 0, TAU);
+      ctx.fillStyle = look.band;
+      ctx.fill();
+      ctx.fillStyle = look.ink;
+    }
+    for (let i = 0; i < 9; i++) ellipse(ctx, -34 + i * 8.5, 62 + (i % 2) * 7, 1.4, 1.4, look.band);
+    return;
+  }
+  for (let x = -36; x < 36; x += 9) {
     ctx.beginPath();
-    ctx.ellipse(7, 20, 6, 4.5, -0.4, 0, Math.PI * 2);
+    ctx.moveTo(x, 46);
+    ctx.lineTo(x + 4.5, 35);
+    ctx.lineTo(x + 9, 46);
+    ctx.closePath();
     ctx.fill();
-    ctx.fillRect(11, 3, 2.4, 17);
-    ctx.beginPath();
-    ctx.moveTo(13, 3);
-    ctx.quadraticCurveTo(21, 6, 19, 13);
-    ctx.quadraticCurveTo(18, 8, 13, 9);
-    ctx.fill();
+  }
+  ctx.fillStyle = look.dark;
+  ctx.fillRect(-40, 31, 80, 2);
+  ctx.fillRect(-40, 46, 80, 2);
+  for (let x = -27; x <= 27; x += 9) ellipse(ctx, x, 62, 2.2, 2.2, look.band);
+  if (kind === 'gold') {
+    ellipse(ctx, 0, 64, 5, 6, '#e0303a');
+    ellipse(ctx, -1.5, 62, 1.6, 2, 'rgba(255,255,255,0.8)');
+  }
+}
+
+function potTextures(scene: Phaser.Scene): void {
+  const w = L.potWidth + 8;
+  const h = L.potHeight + 8;
+  for (const kind of KINDS) {
+    const look = POT_LOOK[kind];
+    // back: the rim ring and the dark mouth the snake comes out of
+    tex(scene, `potBack_${kind}`, w, 20, (ctx) => {
+      ctx.translate(w / 2, 2);
+      const rg = ctx.createLinearGradient(0, 0, 0, 14);
+      rg.addColorStop(0, look.rim);
+      rg.addColorStop(1, look.rimDark);
+      ellipse(ctx, 0, RIM_Y, RIM_RX, RIM_RY, rg);
+      const hg = ctx.createLinearGradient(0, RIM_Y - HOLE_RY, 0, RIM_Y + HOLE_RY);
+      hg.addColorStop(0, '#120608');
+      hg.addColorStop(1, '#3a1a12');
+      ellipse(ctx, 0, RIM_Y + 0.4, HOLE_RX, HOLE_RY, hg);
+    });
+    // front: the body and the front half of the rim, drawn over the snake
+    tex(scene, `potFront_${kind}`, w, h, (ctx) => {
+      ctx.translate(w / 2, 2);
+      potPath(ctx);
+      const g = ctx.createRadialGradient(-11, 38, 3, 0, 50, 46);
+      g.addColorStop(0, look.light);
+      g.addColorStop(0.45, look.mid);
+      g.addColorStop(1, look.dark);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.save();
+      potPath(ctx);
+      ctx.clip();
+      potBand(ctx, kind, look);
+      const side = ctx.createLinearGradient(-33, 0, 33, 0);
+      side.addColorStop(0, 'rgba(255,255,255,0.1)');
+      side.addColorStop(0.5, 'rgba(0,0,0,0)');
+      side.addColorStop(1, 'rgba(0,0,0,0.35)');
+      ctx.fillStyle = side;
+      ctx.fillRect(-40, 0, 80, 90);
+      const low = ctx.createLinearGradient(0, 60, 0, 86);
+      low.addColorStop(0, 'rgba(0,0,0,0)');
+      low.addColorStop(1, 'rgba(0,0,0,0.35)');
+      ctx.fillStyle = low;
+      ctx.fillRect(-40, 60, 80, 30);
+      ctx.beginPath();
+      ctx.ellipse(-20, 46, 4, 15, 0.25, 0, TAU);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fill();
+      ellipse(ctx, -18, 27, 2.4, 3.4, 'rgba(255,255,255,0.7)');
+      ctx.restore();
+      potPath(ctx);
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = 'rgba(40,10,10,0.55)';
+      ctx.stroke();
+      // front lip: lower half of the rim ring
+      ctx.beginPath();
+      ctx.ellipse(0, RIM_Y, RIM_RX, RIM_RY, 0, 0, Math.PI);
+      ctx.ellipse(0, RIM_Y + 0.4, HOLE_RX, HOLE_RY, 0, Math.PI, 0, true);
+      ctx.closePath();
+      const lg = ctx.createLinearGradient(0, RIM_Y, 0, RIM_Y + RIM_RY);
+      lg.addColorStop(0, look.rim);
+      lg.addColorStop(1, look.rimDark);
+      ctx.fillStyle = lg;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(40,10,10,0.45)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(0, RIM_Y, RIM_RX, RIM_RY, 0, 0, Math.PI);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(0, RIM_Y - 0.5, RIM_RX - 2, RIM_RY - 2, 0, 0.15, Math.PI - 0.15);
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.stroke();
+    });
+  }
+  // ground shadow under a pot
+  tex(scene, 'potShadow', 84, 20, (ctx) => {
+    const g = ctx.createRadialGradient(42, 10, 2, 42, 10, 40);
+    g.addColorStop(0, 'rgba(20,0,10,0.55)');
+    g.addColorStop(1, 'rgba(20,0,10,0)');
+    ctx.save();
+    ctx.scale(1, 0.25);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 84, 80);
+    ctx.restore();
   });
-  tex(scene, 'dust', 16, 16, (ctx) => {
+}
+
+function lidPath(ctx: Ctx): void {
+  ctx.beginPath();
+  ctx.moveTo(-29, 25);
+  ctx.bezierCurveTo(-28, 12, -14, 8, 0, 8);
+  ctx.bezierCurveTo(14, 8, 28, 12, 29, 25);
+  ctx.closePath();
+}
+
+function lidTextures(scene: Phaser.Scene): void {
+  const looks = {
+    clay: { light: '#ffc28f', mid: '#cf6a35', dark: '#6f2a12', band: '#fbe3bd', ink: '#1f8f8a' },
+    iron: { light: '#d7deea', mid: '#6b7488', dark: '#262b38', band: '#9aa3b8', ink: '#2b3040' },
+  };
+  for (const [kind, look] of Object.entries(looks)) {
+    // origin of the texture: the top of the knob, centre
+    tex(scene, `lid_${kind}`, 64, 34, (ctx) => {
+      ctx.translate(32, 1);
+      // knob
+      const kg = ctx.createRadialGradient(-2, 2, 0.5, 0, 4, 6);
+      kg.addColorStop(0, look.light);
+      kg.addColorStop(1, look.dark);
+      ellipse(ctx, 0, 4, 5, 4.4, kg);
+      ctx.fillStyle = look.dark;
+      ctx.fillRect(-2.5, 7, 5, 3);
+      // dome
+      lidPath(ctx);
+      const g = ctx.createRadialGradient(-8, 10, 2, 0, 20, 30);
+      g.addColorStop(0, look.light);
+      g.addColorStop(0.5, look.mid);
+      g.addColorStop(1, look.dark);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.save();
+      lidPath(ctx);
+      ctx.clip();
+      if (kind === 'clay') {
+        ctx.fillStyle = look.band;
+        ctx.fillRect(-30, 16, 60, 4);
+        for (let x = -24; x <= 24; x += 8) ellipse(ctx, x, 18, 1.3, 1.3, look.ink);
+      } else {
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(-30, 17, 60, 2);
+        for (let x = -22; x <= 22; x += 11) {
+          ellipse(ctx, x, 21.5, 1.6, 1.6, look.light);
+          ellipse(ctx, x + 0.4, 22, 1.2, 1.2, look.dark);
+        }
+      }
+      ctx.beginPath();
+      ctx.ellipse(-13, 14, 7, 2.6, -0.35, 0, TAU);
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fill();
+      ctx.restore();
+      // flange
+      const fg = ctx.createLinearGradient(0, 23, 0, 30);
+      fg.addColorStop(0, look.mid);
+      fg.addColorStop(1, look.dark);
+      ctx.beginPath();
+      ctx.ellipse(0, 26, 30, 4.5, 0, 0, TAU);
+      ctx.fillStyle = fg;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(30,10,10,0.55)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      lidPath(ctx);
+      ctx.stroke();
+    });
+  }
+  // the shadow a falling lid casts on its pot's rim
+  tex(scene, 'lidShadow', 60, 16, (ctx) => {
+    const g = ctx.createRadialGradient(30, 8, 1, 30, 8, 28);
+    g.addColorStop(0, 'rgba(10,0,20,0.7)');
+    g.addColorStop(1, 'rgba(10,0,20,0)');
+    ctx.save();
+    ctx.scale(1, 16 / 60);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 60, 60);
+    ctx.restore();
+  });
+  tex(scene, 'alert', 22, 22, (ctx) => {
+    ellipse(ctx, 11, 11, 10, 10, '#ff4d4d');
+    ctx.strokeStyle = '#fff3e0';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(9.6, 5, 2.8, 8);
+    ellipse(ctx, 11, 16, 1.6, 1.6, '#ffffff');
+  });
+}
+
+// ---------------------------------------------------------------- snakes
+
+/** The body strip a Rope bends along the snake's path: head end at the top of the texture. */
+function bodyTextures(scene: Phaser.Scene): void {
+  const w = A.bodyWidth;
+  const len = A.bodyLength;
+  for (const kind of KINDS) {
+    const [back, belly, pat] = SKIN[kind];
+    tex(scene, `body_${kind}`, w, len, (ctx) => {
+      const g = ctx.createLinearGradient(0, 0, w, 0);
+      g.addColorStop(0, shade(back, -0.6));
+      g.addColorStop(0.16, shade(back, -0.2));
+      g.addColorStop(0.36, shade(back, 0.3));
+      g.addColorStop(0.6, hex(back));
+      g.addColorStop(0.86, shade(back, -0.35));
+      g.addColorStop(1, shade(back, -0.65));
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, len);
+      // side markings
+      for (let y = 8; y < len; y += 20) {
+        for (const x of [w * 0.13, w * 0.87]) {
+          ctx.beginPath();
+          ctx.moveTo(x, y - 6);
+          ctx.lineTo(x + 3, y);
+          ctx.lineTo(x, y + 6);
+          ctx.lineTo(x - 3, y);
+          ctx.closePath();
+          ctx.fillStyle = shade(pat, 0, 0.85);
+          ctx.fill();
+        }
+      }
+      // belly plates down the front
+      const bw = w * 0.5;
+      const bx = (w - bw) / 2;
+      const bg = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+      bg.addColorStop(0, shade(belly, -0.25));
+      bg.addColorStop(0.35, shade(belly, 0.35));
+      bg.addColorStop(1, shade(belly, -0.3));
+      ctx.fillStyle = bg;
+      ctx.fillRect(bx, 0, bw, len);
+      ctx.strokeStyle = shade(belly, -0.45, 0.8);
+      ctx.lineWidth = 0.8;
+      for (let y = 3; y < len; y += 6) {
+        ctx.beginPath();
+        ctx.moveTo(bx, y);
+        ctx.quadraticCurveTo(w / 2, y + 2.2, bx + bw, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = shade(back, -0.7, 0.9);
+      ctx.fillRect(0, 0, 1.3, len);
+      ctx.fillRect(w - 1.3, 0, 1.3, len);
+    });
+  }
+}
+
+function hoodPath(ctx: Ctx, w: number, h: number): void {
+  const hw = w / 2;
+  ctx.beginPath();
+  ctx.moveTo(0, 1);
+  ctx.bezierCurveTo(hw * 0.6, 0, hw, h * 0.26, hw * 0.97, h * 0.55);
+  ctx.bezierCurveTo(hw * 0.94, h * 0.8, hw * 0.5, h * 0.96, hw * 0.2, h);
+  ctx.lineTo(-hw * 0.2, h);
+  ctx.bezierCurveTo(-hw * 0.5, h * 0.96, -hw * 0.94, h * 0.8, -hw * 0.97, h * 0.55);
+  ctx.bezierCurveTo(-hw, h * 0.26, -hw * 0.6, 0, 0, 1);
+  ctx.closePath();
+}
+
+function headPath(ctx: Ctx, w: number, h: number): void {
+  const hw = w / 2;
+  ctx.beginPath();
+  ctx.moveTo(0, 0.5);
+  ctx.bezierCurveTo(hw * 0.68, 0.5, hw, h * 0.16, hw, h * 0.42);
+  ctx.bezierCurveTo(hw, h * 0.74, hw * 0.6, h * 0.98, 0, h);
+  ctx.bezierCurveTo(-hw * 0.6, h * 0.98, -hw, h * 0.74, -hw, h * 0.42);
+  ctx.bezierCurveTo(-hw, h * 0.16, -hw * 0.68, 0.5, 0, 0.5);
+  ctx.closePath();
+}
+
+function headTextures(scene: Phaser.Scene): void {
+  const hw = A.hoodWidth;
+  const hh = A.hoodHeight;
+  const w = A.headWidth;
+  const h = A.headHeight;
+  for (const kind of KINDS) {
+    const [back, belly, pat] = SKIN[kind];
+    tex(scene, `hood_${kind}`, hw + 4, hh + 4, (ctx) => {
+      ctx.translate(hw / 2 + 2, 2);
+      hoodPath(ctx, hw, hh);
+      const g = ctx.createRadialGradient(0, hh * 0.45, 4, 0, hh * 0.5, hw * 0.6);
+      g.addColorStop(0, shade(back, 0.1));
+      g.addColorStop(1, shade(back, -0.45));
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.save();
+      hoodPath(ctx, hw, hh);
+      ctx.clip();
+      // inner panel and the two eye-spots on the hood
+      ctx.beginPath();
+      ctx.ellipse(0, hh * 0.62, hw * 0.3, hh * 0.42, 0, 0, TAU);
+      ctx.fillStyle = shade(belly, -0.05, 0.9);
+      ctx.fill();
+      for (const sx of [-1, 1]) {
+        ellipse(ctx, sx * hw * 0.3, hh * 0.42, 5.5, 4.5, shade(pat, 0));
+        ellipse(ctx, sx * hw * 0.3, hh * 0.42, 3, 2.3, shade(belly, 0.2));
+        ellipse(ctx, sx * hw * 0.3, hh * 0.42, 1.3, 1.1, shade(pat, -0.2));
+      }
+      ctx.strokeStyle = shade(pat, 0, 0.6);
+      ctx.lineWidth = 1.4;
+      for (let i = 1; i <= 3; i++) {
+        ctx.beginPath();
+        ctx.ellipse(0, hh * 0.5, hw * (0.38 + i * 0.07), hh * (0.4 + i * 0.07), 0, Math.PI * 1.1, Math.PI * 1.9);
+        ctx.stroke();
+      }
+      ctx.restore();
+      hoodPath(ctx, hw, hh);
+      ctx.strokeStyle = shade(back, -0.75);
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+    tex(scene, `head_${kind}`, w + 4, h + 4, (ctx) => {
+      ctx.translate(w / 2 + 2, 2);
+      headPath(ctx, w, h);
+      const g = ctx.createRadialGradient(-w * 0.15, h * 0.25, 2, 0, h * 0.45, w * 0.7);
+      g.addColorStop(0, shade(back, 0.45));
+      g.addColorStop(0.55, hex(back));
+      g.addColorStop(1, shade(back, -0.4));
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.save();
+      headPath(ctx, w, h);
+      ctx.clip();
+      // crown scales
+      for (const [sx, sy, rx] of [
+        [0, 4, 6],
+        [-7, 6, 4.5],
+        [7, 6, 4.5],
+      ]) {
+        ctx.beginPath();
+        ctx.ellipse(sx, sy, rx, 3.6, 0, 0, Math.PI);
+        ctx.fillStyle = shade(pat, 0, 0.55);
+        ctx.fill();
+      }
+      // chin
+      ctx.beginPath();
+      ctx.ellipse(0, h * 0.94, w * 0.3, h * 0.2, 0, Math.PI, 0);
+      ctx.fillStyle = shade(belly, 0, 0.75);
+      ctx.fill();
+      ctx.restore();
+      // cheeks, nostrils, smile
+      ellipse(ctx, -w * 0.32, h * 0.66, 4.5, 2.8, 'rgba(255,110,140,0.45)');
+      ellipse(ctx, w * 0.32, h * 0.66, 4.5, 2.8, 'rgba(255,110,140,0.45)');
+      ellipse(ctx, -2.6, h * 0.72, 0.9, 0.7, shade(back, -0.7));
+      ellipse(ctx, 2.6, h * 0.72, 0.9, 0.7, shade(back, -0.7));
+      ctx.beginPath();
+      ctx.moveTo(-6, h * 0.8);
+      ctx.quadraticCurveTo(0, h * 0.88, 6, h * 0.8);
+      ctx.strokeStyle = shade(back, -0.75);
+      ctx.lineWidth = 1.2;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      headPath(ctx, w, h);
+      ctx.strokeStyle = shade(back, -0.75);
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(-w * 0.2, h * 0.16, 5, 2.2, -0.4, 0, TAU);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.fill();
+    });
+    // a heavy eyelid, drawn over the sleepy snake's eyes
+    tex(scene, `eyelid_${kind}`, 16, 10, (ctx) => {
+      ctx.beginPath();
+      ctx.moveTo(1, 9);
+      ctx.bezierCurveTo(1, 1, 15, 1, 15, 9);
+      ctx.quadraticCurveTo(8, 7, 1, 9);
+      ctx.fillStyle = shade(back, -0.1);
+      ctx.fill();
+      ctx.strokeStyle = shade(back, -0.7);
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(1.5, 9);
+      ctx.quadraticCurveTo(8, 7, 14.5, 9);
+      ctx.stroke();
+    });
+  }
+  tex(scene, 'eye', 14, 16, (ctx) => {
+    const g = ctx.createRadialGradient(5, 5, 1, 7, 8, 8);
+    g.addColorStop(0, '#ffffff');
+    g.addColorStop(1, '#dfe6f0');
+    ellipse(ctx, 7, 8, 6.2, 7.2, g);
+    ctx.strokeStyle = '#1c1426';
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+  });
+  tex(scene, 'pupil', 8, 10, (ctx) => {
+    ellipse(ctx, 4, 5, 3.4, 4.4, '#1c1426');
+    ellipse(ctx, 2.8, 3.4, 1.3, 1.5, '#ffffff');
+    ellipse(ctx, 5, 6.8, 0.6, 0.6, 'rgba(255,255,255,0.7)');
+  });
+  tex(scene, 'tongue', 10, 16, (ctx) => {
+    ctx.strokeStyle = '#e8304a';
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(5, 0);
+    ctx.lineTo(5, 9);
+    ctx.lineTo(2, 14);
+    ctx.moveTo(5, 9);
+    ctx.lineTo(8, 14);
+    ctx.stroke();
+  });
+}
+
+// ---------------------------------------------------------------- the pungi (charmer's gourd flute)
+
+function pungi(scene: Phaser.Scene): void {
+  tex(scene, 'pungi', 48, 80, (ctx) => {
+    ctx.translate(24, 0);
+    // twin pipes, pointing up at the pot
+    for (const x of [-5, 5]) {
+      const g = ctx.createLinearGradient(x - 3.5, 0, x + 3.5, 0);
+      g.addColorStop(0, '#3d200d');
+      g.addColorStop(0.4, '#9a5a2a');
+      g.addColorStop(1, '#2e1608');
+      ctx.fillStyle = g;
+      ctx.fillRect(x - 3.5, 3, 7, 30);
+      ellipse(ctx, x, 3, 3.5, 1.5, '#1d0d04');
+      for (const y of [8, 15, 22]) {
+        ctx.fillStyle = '#f3c14c';
+        ctx.fillRect(x - 3.6, y, 7.2, 1.6);
+      }
+    }
+    // wax collar
+    ellipse(ctx, 0, 33, 11, 4, '#5a2a10');
+    // gourd
+    ctx.beginPath();
+    ctx.moveTo(-9, 34);
+    ctx.bezierCurveTo(-24, 38, -22, 60, -5, 63);
+    ctx.lineTo(5, 63);
+    ctx.bezierCurveTo(22, 60, 24, 38, 9, 34);
+    ctx.closePath();
+    const gg = ctx.createRadialGradient(-6, 42, 2, 0, 48, 20);
+    gg.addColorStop(0, '#ffd98a');
+    gg.addColorStop(0.5, '#d18a32');
+    gg.addColorStop(1, '#6e3a10');
+    ctx.fillStyle = gg;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(50,20,0,0.6)';
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = '#b8302a';
+    ctx.fillRect(-24, 45, 48, 3.2);
+    for (let x = -15; x <= 15; x += 6) ellipse(ctx, x, 52, 1.4, 1.4, '#1f8f8a');
+    ellipse(ctx, -7, 42, 3, 5, 'rgba(255,255,255,0.4)');
+    ctx.restore();
+    // mouthpiece
+    const mg = ctx.createLinearGradient(-4, 0, 4, 0);
+    mg.addColorStop(0, '#9c7b52');
+    mg.addColorStop(0.5, '#fff1d0');
+    mg.addColorStop(1, '#9c7b52');
+    ctx.fillStyle = mg;
+    ctx.beginPath();
+    ctx.moveTo(-4.5, 62);
+    ctx.lineTo(4.5, 62);
+    ctx.lineTo(3, 78);
+    ctx.lineTo(-3, 78);
+    ctx.closePath();
+    ctx.fill();
+    // tassel
+    ctx.strokeStyle = '#e2304a';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(14, 44);
+    ctx.quadraticCurveTo(20, 52, 18, 62);
+    ctx.stroke();
+    ellipse(ctx, 18, 63, 2.4, 3.4, '#ffcc33');
+  });
+}
+
+// ---------------------------------------------------------------- particles and glows
+
+function fxTextures(scene: Phaser.Scene): void {
+  tex(scene, 'spark', 16, 16, (ctx) => {
     const g = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
-    g.addColorStop(0, 'rgba(255,240,220,0.8)');
-    g.addColorStop(1, 'rgba(255,240,220,0)');
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.35, 'rgba(255,255,255,0.7)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, 16, 16);
   });
-  tex(scene, 'beamH', 64, 24, (ctx) => {
-    const g = ctx.createLinearGradient(0, 0, 0, 24);
-    g.addColorStop(0, 'rgba(255,255,255,0)');
-    g.addColorStop(0.5, 'rgba(255,255,255,1)');
-    g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, 64, 24);
-  });
-  tex(scene, 'arrow', 24, 16, (ctx) => {
+  tex(scene, 'star', 18, 18, (ctx) => {
+    ctx.translate(9, 9);
     ctx.beginPath();
-    ctx.moveTo(2, 2);
-    ctx.lineTo(12, 13);
-    ctx.lineTo(22, 2);
-    ctx.lineWidth = 4;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * TAU - Math.PI / 2;
+      const r = i % 2 ? 2.2 : 8.5;
+      ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  });
+  tex(scene, 'note', 16, 20, (ctx) => {
+    const draw = (fill: string, dx: number, dy: number, lw: number) => {
+      ctx.save();
+      ctx.translate(dx, dy);
+      ctx.beginPath();
+      ctx.ellipse(5, 15, 4.2, 3.2, -0.4, 0, TAU);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.fillRect(8, 2, 1.8, 13);
+      ctx.beginPath();
+      ctx.moveTo(9.8, 2);
+      ctx.quadraticCurveTo(15, 5, 13, 10);
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = fill;
+      ctx.stroke();
+      ctx.restore();
+    };
+    draw('rgba(60,20,40,0.6)', 0.8, 0.8, 2.2);
+    draw('#ffffff', 0, 0, 2);
+  });
+  tex(scene, 'petal', 12, 8, (ctx) => {
+    ctx.beginPath();
+    ctx.ellipse(6, 4, 5.5, 3, 0, 0, TAU);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  });
+  tex(scene, 'leaf', 14, 8, (ctx) => leaf(ctx, 1, 4, 12, 0, '#7ad65f', '#2f8236'));
+  tex(scene, 'dust', 20, 20, (ctx) => {
+    const g = ctx.createRadialGradient(10, 10, 0, 10, 10, 10);
+    g.addColorStop(0, 'rgba(255,236,210,0.9)');
+    g.addColorStop(1, 'rgba(255,236,210,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 20, 20);
+  });
+  tex(scene, 'shard', 10, 8, (ctx) => {
+    ctx.beginPath();
+    ctx.moveTo(0, 8);
+    ctx.lineTo(4, 0);
+    ctx.lineTo(10, 5);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  });
+  // a warm column of light up the charmed lane
+  const pitch = (L.width - 2 * L.sidePad) / CONFIG.board.lanes;
+  const beamH = L.rimY - L.lidTop + 60;
+  tex(scene, 'beam', pitch, beamH, (ctx) => {
+    const v = ctx.createLinearGradient(0, 0, 0, beamH);
+    v.addColorStop(0, 'rgba(255,214,120,0)');
+    v.addColorStop(0.6, 'rgba(255,214,120,0.18)');
+    v.addColorStop(1, 'rgba(255,214,120,0.45)');
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, pitch, beamH);
+    ctx.globalCompositeOperation = 'destination-in';
+    const hz = ctx.createLinearGradient(0, 0, pitch, 0);
+    hz.addColorStop(0, 'rgba(0,0,0,0)');
+    hz.addColorStop(0.5, 'rgba(0,0,0,1)');
+    hz.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hz;
+    ctx.fillRect(0, 0, pitch, beamH);
+  });
+  // red edges that pulse while the rug is full
+  tex(scene, 'vignette', L.width, L.height, (ctx) => {
+    const g = ctx.createRadialGradient(
+      L.width / 2,
+      L.height * 0.55,
+      L.height * 0.3,
+      L.width / 2,
+      L.height * 0.55,
+      L.height * 0.62,
+    );
+    g.addColorStop(0, 'rgba(255,40,60,0)');
+    g.addColorStop(1, 'rgba(255,40,60,0.75)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, L.width, L.height);
+  });
+  tex(scene, 'ring', 64, 64, (ctx) => {
+    ctx.beginPath();
+    ctx.arc(32, 32, 28, 0, TAU);
     ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 4;
     ctx.stroke();
   });
 }
 
-/** Paint every texture once (re-entering a scene reuses them). */
-export function buildArt(scene: Phaser.Scene, pitch: number, rimY: number): void {
-  backgroundTexture(scene, rimY);
-  vineTexture(scene);
-  laneTextures(scene, pitch, rimY - L.vineY);
-  basketTextures(scene, pitch);
+/** Paint every texture the game uses (each only once per game). */
+export function buildArt(scene: Phaser.Scene): void {
+  background(scene);
+  vine(scene);
+  tendril(scene);
+  blooms(scene);
   potTextures(scene);
-  snakeTextures(scene);
-  particleTextures(scene);
-}
-
-export function potKey(kind: 'plain' | 'gold' | 'wild', color: number): string {
-  return kind === 'wild' ? 'wild' : kind === 'gold' ? `gold${color}` : `pot${color}`;
+  lidTextures(scene);
+  bodyTextures(scene);
+  headTextures(scene);
+  pungi(scene);
+  fxTextures(scene);
 }

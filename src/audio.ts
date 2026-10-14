@@ -1,14 +1,30 @@
 /**
- * Synthesized sound only (no files, no network): a breathy flute note while a column is charmed, and a rising
- * pop per cascade step. Starts on the first touch, as mobile browsers require. Every call is safe without audio.
+ * Synthesized sound only (no files, no network): a reedy pungi melody while a snake is charmed, and short
+ * effects for lids, saves, charms and levels. Starts on the first touch, as mobile browsers require. Every call
+ * is safe without audio.
  */
 import { CONFIG } from './config';
 
-const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19]; // pentatonic steps, one per column
+// Double harmonic scale (semitones), the snake-charmer sound; the melody wanders over two octaves of it.
+const SCALE = [0, 1, 4, 5, 7, 8, 11, 12, 13, 16, 17, 19];
+const LANE_STEP = [0, 2, 4, 5, 7, 9, 11]; // each lane's tonic, a step up the major scale
+
+interface Voice {
+  osc: OscillatorNode;
+  osc2: OscillatorNode;
+  gain: GainNode;
+  lfo: OscillatorNode;
+  drone: OscillatorNode;
+  droneGain: GainNode;
+}
 
 export class Sound {
   private ctx: AudioContext | null = null;
-  private flute: { osc: OscillatorNode; gain: GainNode; lfo: OscillatorNode } | null = null;
+  private voice: Voice | null = null;
+  private noise: AudioBuffer | null = null;
+  private lane: number | null = null;
+  private degree = 4;
+  private noteTimer = 0;
   muted = false;
 
   private context(): AudioContext | null {
@@ -22,79 +38,98 @@ export class Sound {
     }
   }
 
-  private hz(step: number): number {
-    return CONFIG.feel.noteBaseHz * Math.pow(2, step / 12);
+  private hz(semis: number): number {
+    return CONFIG.feel.noteBaseHz * Math.pow(2, semis / 12);
   }
 
-  /** Start, retune or stop (lane = null) the flute. */
+  private tonic(lane: number): number {
+    return LANE_STEP[lane % LANE_STEP.length];
+  }
+
+  /** Start, move or stop (lane = null) the pungi. */
   charm(lane: number | null): void {
+    this.lane = lane;
     const ctx = this.context();
     if (!ctx || lane === null) {
-      this.stopFlute();
+      this.stopVoice();
       return;
     }
-    const freq = this.hz(SCALE[lane % SCALE.length]);
-    if (this.flute) {
-      this.flute.osc.frequency.setTargetAtTime(freq, ctx.currentTime, 0.03);
+    const base = this.tonic(lane);
+    if (this.voice) {
+      this.voice.drone.frequency.setTargetAtTime(this.hz(base - 12), ctx.currentTime, 0.05);
+      this.glide();
       return;
     }
     const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    const osc2 = ctx.createOscillator();
     const lfo = ctx.createOscillator();
     const lfoGain = ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.value = freq;
-    lfo.frequency.value = 5.5; // vibrato
-    lfoGain.gain.value = 6;
-    lfo.connect(lfoGain).connect(osc.frequency);
+    const filter = ctx.createBiquadFilter();
+    const nasal = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc2.type = 'square';
+    osc2.detune.value = 8;
+    lfo.frequency.value = 6; // vibrato
+    lfoGain.gain.value = 7;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+    lfoGain.connect(osc2.frequency);
+    filter.type = 'lowpass';
+    filter.frequency.value = 2200;
+    nasal.type = 'peaking';
+    nasal.frequency.value = 1400;
+    nasal.gain.value = 9;
+    nasal.Q.value = 2;
     gain.gain.value = 0;
-    gain.gain.setTargetAtTime(0.12, ctx.currentTime, 0.04);
-    osc.connect(gain).connect(ctx.destination);
-    osc.start();
-    lfo.start();
-    this.flute = { osc, gain, lfo };
+    gain.gain.setTargetAtTime(0.07, ctx.currentTime, 0.04);
+    osc.connect(filter);
+    osc2.connect(filter);
+    filter.connect(nasal).connect(gain).connect(ctx.destination);
+    const drone = ctx.createOscillator();
+    const droneGain = ctx.createGain();
+    drone.type = 'triangle';
+    drone.frequency.value = this.hz(base - 12);
+    droneGain.gain.value = 0;
+    droneGain.gain.setTargetAtTime(0.05, ctx.currentTime, 0.1);
+    drone.connect(droneGain).connect(ctx.destination);
+    this.voice = { osc, osc2, gain, lfo, drone, droneGain };
+    this.degree = 4;
+    this.glide(true);
+    for (const o of [osc, osc2, lfo, drone]) o.start();
   }
 
-  private stopFlute(): void {
-    if (!this.flute || !this.ctx) return;
-    const { osc, gain, lfo } = this.flute;
+  private glide(jump = false): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.voice || this.lane === null) return;
+    const f = this.hz(this.tonic(this.lane) + SCALE[this.degree]);
+    const t = ctx.currentTime;
+    for (const o of [this.voice.osc, this.voice.osc2]) {
+      if (jump) o.frequency.setValueAtTime(f, t);
+      else o.frequency.setTargetAtTime(f, t, 0.025);
+    }
+  }
+
+  /** Call every frame: the melody wanders up and down the scale while the flute plays. */
+  tick(dt: number): void {
+    if (!this.voice) return;
+    this.noteTimer += dt;
+    if (this.noteTimer < CONFIG.feel.noteStepMs) return;
+    this.noteTimer = 0;
+    const r = Math.random();
+    const move = r < 0.4 ? -1 : r < 0.8 ? 1 : r < 0.9 ? 2 : -2;
+    this.degree = Math.max(0, Math.min(SCALE.length - 1, this.degree + move));
+    this.glide();
+  }
+
+  private stopVoice(): void {
+    if (!this.voice || !this.ctx) return;
+    const v = this.voice;
     const t = this.ctx.currentTime;
-    gain.gain.setTargetAtTime(0, t, 0.05);
-    osc.stop(t + 0.3);
-    lfo.stop(t + 0.3);
-    this.flute = null;
-  }
-
-  pop(chain: number): void {
-    const ctx = this.context();
-    if (!ctx) return;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const t = ctx.currentTime;
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(this.hz(12 + 3 * chain), t);
-    osc.frequency.exponentialRampToValueAtTime(this.hz(24 + 3 * chain), t + 0.12);
-    gain.gain.setValueAtTime(0.18, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(t);
-    osc.stop(t + 0.3);
-  }
-
-  thud(): void {
-    const ctx = this.context();
-    if (!ctx) return;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const t = ctx.currentTime;
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(120, t);
-    osc.frequency.exponentialRampToValueAtTime(60, t + 0.08);
-    gain.gain.setValueAtTime(0.05, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(t);
-    osc.stop(t + 0.12);
+    v.gain.gain.setTargetAtTime(0, t, 0.05);
+    v.droneGain.gain.setTargetAtTime(0, t, 0.08);
+    for (const o of [v.osc, v.osc2, v.lfo, v.drone]) o.stop(t + 0.4);
+    this.voice = null;
   }
 
   private tone(type: OscillatorType, from: number, to: number, start: number, len: number, vol: number): void {
@@ -113,29 +148,81 @@ export class Sound {
     osc.stop(t + len + 0.05);
   }
 
-  /** Gold pot: a bright sweep. */
-  blast(): void {
-    if (!this.context()) return;
-    this.tone('sawtooth', 200, 1600, 0, 0.35, 0.06);
-    this.tone('sine', 900, 1800, 0.05, 0.3, 0.1);
+  private hiss(start: number, len: number, vol: number, cutoff: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (!this.noise) {
+      this.noise = ctx.createBuffer(1, ctx.sampleRate * 0.5, ctx.sampleRate);
+      const d = this.noise.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    const src = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    const t = ctx.currentTime + start;
+    src.buffer = this.noise;
+    filter.type = 'lowpass';
+    filter.frequency.value = cutoff;
+    gain.gain.setValueAtTime(vol, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(filter).connect(gain).connect(ctx.destination);
+    src.start(t);
+    src.stop(t + len + 0.05);
   }
 
-  /** Fever starts: a quick rising arpeggio. */
+  /** A lid rattles on the vine. */
+  rattle(): void {
+    if (!this.context()) return;
+    for (let i = 0; i < 4; i++) this.tone('square', 900 + i * 60, 700, i * 0.07, 0.04, 0.025);
+  }
+
+  /** A lid bounces off a snake's head. */
+  boing(combo: number): void {
+    if (!this.context()) return;
+    const up = 1 + combo * 0.08;
+    this.tone('sine', 260 * up, 780 * up, 0, 0.16, 0.18);
+    this.tone('triangle', 780 * up, 520 * up, 0.12, 0.14, 0.08);
+  }
+
+  /** A lid lands on a pot. */
+  clunk(): void {
+    if (!this.context()) return;
+    this.tone('sine', 180, 45, 0, 0.25, 0.35);
+    this.hiss(0, 0.18, 0.25, 900);
+  }
+
+  /** A pot arrives or a lid pops off. */
+  pop(pitch = 1): void {
+    if (!this.context()) return;
+    this.tone('sine', 420 * pitch, 900 * pitch, 0, 0.09, 0.14);
+  }
+
+  /** A snake climbs into the vine. */
+  chime(combo: number): void {
+    if (!this.context()) return;
+    const base = 5 + Math.min(combo, 6) * 2;
+    [0, 4, 7, 12].forEach((st, i) =>
+      this.tone('triangle', this.hz(base + st + 12), this.hz(base + st + 12), i * 0.06, 0.28, 0.11),
+    );
+    this.hiss(0, 0.3, 0.04, 6000);
+  }
+
+  /** Level cleared. */
   fanfare(): void {
     if (!this.context()) return;
-    [0, 4, 7, 12, 16].forEach((st, i) =>
-      this.tone('triangle', this.hz(12 + st), this.hz(12 + st), i * 0.07, 0.22, 0.12),
+    [0, 4, 7, 12, 16, 19, 24].forEach((st, i) =>
+      this.tone('triangle', this.hz(12 + st), this.hz(12 + st), i * 0.08, 0.3, 0.12),
     );
   }
 
-  /** Stage clear. */
-  stage(): void {
+  /** Game over. */
+  sad(): void {
     if (!this.context()) return;
-    [0, 7, 12].forEach((st, i) => this.tone('sine', this.hz(7 + st), this.hz(7 + st), i * 0.1, 0.3, 0.14));
+    [12, 11, 8, 7, 4].forEach((st, i) => this.tone('triangle', this.hz(st), this.hz(st) * 0.97, i * 0.16, 0.3, 0.12));
   }
 
   setMuted(m: boolean): void {
-    if (m) this.stopFlute();
+    if (m) this.stopVoice();
     this.muted = m;
   }
 }

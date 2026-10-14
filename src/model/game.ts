@@ -1,57 +1,61 @@
 /**
  * Rules of the game as pure TypeScript: no Phaser, no DOM. The scene calls setHeld() from input and step()
  * every frame, then draws the state and plays the events. docs/GAME_RULES.md describes these rules in words.
+ *
+ * Heights are fractions of the climb: 0 is the pot rim, 1 is the bottom of a lid hanging on the vine.
  */
 import type { GameConfig } from '../config';
 import { nextRandom, randomInt } from './rng';
 
-export type RulesConfig = Pick<GameConfig, 'board' | 'pace' | 'levels' | 'scoring' | 'specials' | 'fever'>;
+export type RulesConfig = Pick<GameConfig, 'board' | 'snakes' | 'lids' | 'levels' | 'scoring'>;
 
-/** plain: matches its colour; gold: matches its colour and blasts its whole row when cleared; wild: matches any. */
-export type PotKind = 'plain' | 'gold' | 'wild';
+/** green: the plain snake; gold: slow to charm, worth more; sleepy: slips back fast when the flute stops. */
+export type SnakeKind = 'green' | 'gold' | 'sleepy';
+export type LidKind = 'clay' | 'iron';
+/** hung: on the vine; wobble: about to drop; fall; bounce: flying back up; sealed: sitting on its pot. */
+export type LidPhase = 'hung' | 'wobble' | 'fall' | 'bounce' | 'sealed';
+
+export interface Lid {
+  kind: LidKind;
+  phase: LidPhase;
+  y: number; // height of the lid's bottom
+  v: number; // falling speed, climbs per second
+  timer: number; // ms left: rest while hung, wobble, or sealed
+}
 
 export interface Pot {
   id: number; // stable identity, so the view can animate each pot
-  color: number;
-  kind: PotKind;
-}
-
-export interface Column {
-  lift: number; // rows the snake has raised the stack off the basket rim
-  pots: Pot[]; // bottom first; pot i sits at row lift + i
-}
-
-export interface Cell {
-  col: number;
-  row: number;
-  pot: Pot;
+  kind: SnakeKind;
+  h: number; // height of the snake's head
+  lid: Lid;
 }
 
 export type GameEvent =
-  | { type: 'move'; col: number; lift: number }
-  | { type: 'drop'; col: number; row: number; pot: Pot }
-  | { type: 'clear'; cells: Cell[]; chain: number; points: number; longest: number; blastRows: number[] }
-  | { type: 'stage'; stage: number; bonus: number }
-  | { type: 'fever'; on: boolean }
-  | { type: 'over'; col: number };
+  | { type: 'level'; level: number } // a level starts; its pots arrive as spawn events
+  | { type: 'spawn'; lane: number; pot: Pot; from: number | null } // from: the lane whose landed lid made it
+  | { type: 'wobble'; lane: number; ms: number }
+  | { type: 'fall'; lane: number }
+  | { type: 'save'; lane: number; y: number; points: number; combo: number }
+  | { type: 'seal'; lane: number }
+  | { type: 'reopen'; lane: number }
+  | { type: 'charm'; lane: number; pot: Pot; points: number; combo: number }
+  | { type: 'clear'; level: number; bonus: number; perfect: boolean }
+  | { type: 'over'; lane: number };
 
 export interface GameState {
-  cols: Column[];
+  lanes: (Pot | null)[];
   held: number | null;
   score: number;
-  stage: number;
-  stageCleared: number;
-  totalCleared: number;
-  colors: number;
-  chain: number; // cascade depth of the clear in progress (0 = none)
-  chainTimer: number; // ms left before the cascade check; everything else waits
-  riseAcc: number;
-  sinkAcc: number[];
-  dropAcc: number;
-  nextDrop: { col: number; pot: Pot }; // the lid already chosen, so the view can warn where it lands
-  fever: number; // meter 0..1; full starts fever
-  feverTime: number; // ms of fever left (lids paused, points multiplied)
-  bestChain: number;
+  level: number;
+  combo: number; // charms and saves in a row, each inside comboMs of the last
+  comboTimer: number;
+  lidTimer: number; // ms until the next lid starts to wobble
+  introTimer: number; // ms of calm while a level's pots arrive
+  breakTimer: number; // ms of pause after a level is cleared
+  landedThisLevel: number;
+  charmed: number;
+  saves: number;
+  landed: number;
   elapsed: number;
   over: boolean;
   rng: number;
@@ -59,372 +63,286 @@ export interface GameState {
   events: GameEvent[];
 }
 
-export function colorsForStage(stage: number, cfg: RulesConfig): number {
-  const extra = Math.floor((stage - 1) / cfg.levels.colorEveryStages);
-  return Math.min(cfg.levels.maxColors, cfg.levels.startColors + extra);
+const pow = (base: number, level: number) => Math.pow(base, level - 1);
+
+export function lidIntervalForLevel(level: number, cfg: RulesConfig): number {
+  return Math.max(cfg.lids.lidMinMs, cfg.lids.lidMs * pow(cfg.lids.lidFactor, level));
 }
 
-export function dropIntervalForStage(stage: number, cfg: RulesConfig): number {
-  return Math.max(cfg.pace.dropMinMs, cfg.pace.dropMs * Math.pow(cfg.pace.dropFactor, stage - 1));
+export function warnMsForLevel(level: number, cfg: RulesConfig): number {
+  return Math.max(cfg.lids.warnMinMs, cfg.lids.warnMs * pow(cfg.lids.warnFactor, level));
 }
 
-/**
- * The lid interval right now: the stage's interval, shortened while the board is sparse (fewer than
- * sparseFill of all slots filled) so there is always something to line up; full speed down to sparseFactor.
- */
-export function currentDropInterval(state: GameState, cfg: RulesConfig): number {
-  const base = dropIntervalForStage(state.stage, cfg);
-  const filled = state.cols.reduce((n, c) => n + c.pots.length, 0) / (cfg.board.cols * cfg.board.rows);
-  const k = Math.min(1, filled / cfg.pace.sparseFill);
-  return base * (cfg.pace.sparseFactor + (1 - cfg.pace.sparseFactor) * k);
+export function gravityFor(level: number, kind: LidKind, cfg: RulesConfig): number {
+  const g = Math.min(cfg.lids.gravityMax, cfg.lids.gravity * pow(cfg.lids.gravityFactor, level));
+  return kind === 'iron' ? g * cfg.lids.ironMult : g;
 }
 
-export function stageTarget(stage: number, cfg: RulesConfig): number {
-  return cfg.levels.stageTarget + (stage - 1) * cfg.levels.stageTargetStep;
+/** How fast a snake climbs while charmed: every level a little slower, down to riseMinMult. */
+export function riseFor(level: number, kind: SnakeKind, cfg: RulesConfig): number {
+  const mult = Math.max(cfg.snakes.riseMinMult, pow(cfg.snakes.riseFactor, level));
+  return cfg.snakes[kind].rise * mult;
 }
 
-function makePot(state: GameState, color: number, kind: PotKind = 'plain'): Pot {
-  return { id: state.nextId++, color, kind };
+export function maxAirForLevel(level: number, cfg: RulesConfig): number {
+  return Math.min(cfg.lids.maxAirCap, 1 + Math.floor((level - 1) / cfg.lids.maxAirEvery));
 }
 
-/** True when this pot, landing on column c, would complete a line by itself. */
-function completesLine(state: GameState, c: number, pot: Pot, cfg: RulesConfig): boolean {
-  const trial = state.cols.map((x, i) => (i === c ? { lift: x.lift, pots: [...x.pots, pot] } : x));
-  return findMatches(trial, cfg).some((m) => m.pot === pot);
+export function potsForLevel(level: number, cfg: RulesConfig): number {
+  const n = cfg.levels.startPots + Math.floor((level - 1) / cfg.levels.potsEvery);
+  return Math.min(cfg.levels.maxPots, cfg.board.lanes, n);
 }
 
-/**
- * Deal a plain or gold pot's colour so that landing on column c does not complete a line by itself: every
- * clear starts with the player. Wild pots are a gift and may. Called when the lid is planned and again as it
- * lands (the board may have changed in between).
- */
-function dealColor(state: GameState, c: number, pot: Pot, cfg: RulesConfig): void {
-  if (pot.kind === 'wild' || state.cols[c].pots.length >= cfg.board.rows) return;
-  const start = pot.color;
-  for (let k = 0; k < state.colors; k++) {
-    pot.color = (start + k) % state.colors;
-    if (!completesLine(state, c, pot, cfg)) return;
+export function lidsInAir(state: GameState): number {
+  return state.lanes.filter((p) => p && (p.lid.phase === 'wobble' || p.lid.phase === 'fall')).length;
+}
+
+function nextLidMs(state: GameState, cfg: RulesConfig): number {
+  const j = cfg.lids.jitter;
+  const pots = Math.max(1, state.lanes.filter((p) => p !== null).length);
+  const crowd = cfg.lids.refPots / pots;
+  return lidIntervalForLevel(state.level, cfg) * crowd * (1 - j + 2 * j * nextRandom(state));
+}
+
+function newPot(state: GameState, cfg: RulesConfig, restMs: number): Pot {
+  const lv = cfg.levels;
+  const roll = nextRandom(state);
+  let kind: SnakeKind = 'green';
+  if (state.level >= lv.sleepyFrom && roll < lv.sleepyRate) kind = 'sleepy';
+  else if (state.level >= lv.goldFrom && roll >= 1 - lv.goldRate) kind = 'gold';
+  const iron = state.level >= lv.ironFrom && nextRandom(state) < lv.ironRate;
+  return {
+    id: state.nextId++,
+    kind,
+    h: 0,
+    lid: { kind: iron ? 'iron' : 'clay', phase: 'hung', y: 1, v: 0, timer: restMs },
+  };
+}
+
+function startLevel(state: GameState, level: number, cfg: RulesConfig): void {
+  state.level = level;
+  state.landedThisLevel = 0;
+  state.introTimer = cfg.levels.introMs;
+  state.lidTimer = cfg.levels.introMs + nextLidMs(state, cfg);
+  state.events.push({ type: 'level', level });
+  // Pick which lanes get a pot, at random.
+  const free = state.lanes.map((_, i) => i);
+  for (let n = potsForLevel(level, cfg); n > 0 && free.length; n--) {
+    const lane = free.splice(randomInt(state, free.length), 1)[0];
+    const pot = newPot(state, cfg, 0);
+    state.lanes[lane] = pot;
+    state.events.push({ type: 'spawn', lane, pot, from: null });
   }
-  pot.color = start;
 }
 
-/** A new lid for column c: mostly plain, sometimes gold or wild (rates in CONFIG.specials). */
-function rollLid(state: GameState, c: number, cfg: RulesConfig): Pot {
-  const r = nextRandom(state);
-  const kind: PotKind =
-    r < cfg.specials.wildRate ? 'wild' : r < cfg.specials.wildRate + cfg.specials.goldRate ? 'gold' : 'plain';
-  const pot = makePot(state, randomInt(state, state.colors), kind);
-  dealColor(state, c, pot, cfg);
-  return pot;
-}
-
-export function createGame(seed: number, cfg: RulesConfig): GameState {
-  const { cols, startPots } = cfg.board;
+/** A new game. firstLevel > 1 starts further in (the ?level=N flag, for playtesting later levels). */
+export function createGame(seed: number, cfg: RulesConfig, firstLevel = 1): GameState {
   const state: GameState = {
-    cols: [],
+    lanes: Array.from({ length: cfg.board.lanes }, () => null),
     held: null,
     score: 0,
-    stage: 1,
-    stageCleared: 0,
-    totalCleared: 0,
-    colors: colorsForStage(1, cfg),
-    chain: 0,
-    chainTimer: 0,
-    riseAcc: 0,
-    sinkAcc: new Array<number>(cols).fill(0),
-    dropAcc: 0,
-    nextDrop: { col: 0, pot: { id: -1, color: 0, kind: 'plain' } },
-    fever: 0,
-    feverTime: 0,
-    bestChain: 0,
+    level: 0,
+    combo: 0,
+    comboTimer: 0,
+    lidTimer: 0,
+    introTimer: 0,
+    breakTimer: 0,
+    landedThisLevel: 0,
+    charmed: 0,
+    saves: 0,
+    landed: 0,
     elapsed: 0,
     over: false,
     rng: seed | 0,
     nextId: 1,
     events: [],
   };
-  // Deal the opening stacks without any ready-made match, so the first clear is the player's.
-  do {
-    state.cols = Array.from({ length: cols }, () => ({
-      lift: 0,
-      pots: Array.from({ length: startPots }, () => makePot(state, randomInt(state, state.colors))),
-    }));
-  } while (findMatches(state.cols, cfg).length > 0);
-  planNextDrop(state, cfg);
+  startLevel(state, Math.max(1, Math.floor(firstLevel)), cfg);
   return state;
 }
 
-/** The pot at an absolute row of a column, or null when that slot is empty. */
-export function potAt(col: Column, row: number): Pot | null {
-  const i = row - col.lift;
-  return i >= 0 && i < col.pots.length ? col.pots[i] : null;
+/** Which lane the flute is playing for (null = nobody). Only one snake is charmed at a time. */
+export function setHeld(state: GameState, lane: number | null): void {
+  state.held = lane;
 }
 
-export function topRow(col: Column): number {
-  return col.lift + col.pots.length - 1;
+function bumpCombo(state: GameState, cfg: RulesConfig): number {
+  state.combo = Math.min(cfg.scoring.comboCap, state.combo + 1);
+  state.comboTimer = cfg.scoring.comboMs;
+  return state.combo;
 }
 
-/** True when the pots qualify as one run: no gaps, and every non-wild pot shares a colour. */
-function sameRun(line: (Pot | null)[]): boolean {
-  let color = -1;
-  for (const p of line) {
-    if (!p) return false;
-    if (p.kind === 'wild') continue;
-    if (color === -1) color = p.color;
-    else if (p.color !== color) return false;
+function charm(state: GameState, lane: number, cfg: RulesConfig): void {
+  const pot = state.lanes[lane];
+  if (!pot) return;
+  const combo = bumpCombo(state, cfg);
+  const points = cfg.snakes[pot.kind].points * combo;
+  state.score += points;
+  state.charmed++;
+  state.lanes[lane] = null;
+  state.events.push({ type: 'charm', lane, pot, points, combo });
+  // The snake tugs the vine as it climbs into it: nearby hanging lids shake loose.
+  const reach = cfg.lids.shakeReach;
+  for (let i = Math.max(0, lane - reach); i <= Math.min(state.lanes.length - 1, lane + reach); i++) {
+    const lid = state.lanes[i]?.lid;
+    if (!lid || lid.phase !== 'hung') continue;
+    lid.phase = 'wobble';
+    lid.timer = cfg.lids.shakeWarnMs;
+    state.events.push({ type: 'wobble', lane: i, ms: cfg.lids.shakeWarnMs });
   }
+  if (state.lanes.every((p) => p === null)) {
+    const perfect = state.landedThisLevel === 0;
+    const bonus = cfg.scoring.levelBonus * state.level + (perfect ? cfg.scoring.perfectBonus : 0);
+    state.score += bonus;
+    state.breakTimer = cfg.levels.breakMs;
+    state.events.push({ type: 'clear', level: state.level, bonus, perfect });
+  }
+}
+
+/** A landed lid seals its pot and stirs up another pot in the nearest free lane; no free lane ends the game. */
+function seal(state: GameState, lane: number, cfg: RulesConfig): void {
+  const pot = state.lanes[lane];
+  if (!pot) return;
+  pot.h = 0;
+  pot.lid.phase = 'sealed';
+  pot.lid.y = 0;
+  pot.lid.v = 0;
+  pot.lid.timer = cfg.lids.sealMs;
+  state.landed++;
+  state.landedThisLevel++;
+  state.combo = 0;
+  state.events.push({ type: 'seal', lane });
+  let best: number[] = [];
+  let bestDist = Infinity;
+  state.lanes.forEach((p, i) => {
+    if (p) return;
+    const d = Math.abs(i - lane);
+    if (d < bestDist) [best, bestDist] = [[i], d];
+    else if (d === bestDist) best.push(i);
+  });
+  if (!best.length) {
+    state.over = true;
+    state.held = null;
+    state.events.push({ type: 'over', lane });
+    return;
+  }
+  const target = best[randomInt(state, best.length)];
+  const fresh = newPot(state, cfg, cfg.lids.restMs + cfg.lids.spawnGraceMs);
+  state.lanes[target] = fresh;
+  state.events.push({ type: 'spawn', lane: target, pot: fresh, from: lane });
+}
+
+function releaseLid(state: GameState, cfg: RulesConfig): boolean {
+  if (lidsInAir(state) >= maxAirForLevel(state.level, cfg)) return false;
+  const ready = state.lanes.flatMap((p, i) => (p && p.lid.phase === 'hung' && p.lid.timer <= 0 ? [i] : []));
+  if (!ready.length) return false;
+  const lane = ready[randomInt(state, ready.length)];
+  const lid = (state.lanes[lane] as Pot).lid;
+  const ms = warnMsForLevel(state.level, cfg);
+  lid.phase = 'wobble';
+  lid.timer = ms;
+  state.events.push({ type: 'wobble', lane, ms });
   return true;
 }
 
-/** Indices covered by runs of matchLength or more in a line (wild pots count as any colour). */
-function runsIn(line: (Pot | null)[], matchLength: number): Set<number> {
-  const hit = new Set<number>();
-  for (let i = 0; i + matchLength <= line.length; i++) {
-    if (!sameRun(line.slice(i, i + matchLength))) continue;
-    for (let k = i; k < i + matchLength; k++) hit.add(k);
-  }
-  return hit;
-}
-
-/**
- * Every pot in a run of matchLength or more pots of one colour, side by side in a row or stacked in a column,
- * wild pots counting as any colour. Each pot appears once even when runs overlap or cross.
- */
-export function findMatches(cols: Column[], cfg: RulesConfig): Cell[] {
-  const { rows, matchLength } = cfg.board;
-  const found = new Map<number, Cell>();
-  for (let row = 0; row < rows; row++) {
-    const line = cols.map((c) => potAt(c, row));
-    for (const c of runsIn(line, matchLength)) {
-      const p = line[c] as Pot;
-      found.set(p.id, { col: c, row, pot: p });
-    }
-  }
-  cols.forEach((col, c) => {
-    for (const i of runsIn(col.pots, matchLength)) {
-      const p = col.pots[i];
-      if (!found.has(p.id)) found.set(p.id, { col: c, row: col.lift + i, pot: p });
-    }
-  });
-  return [...found.values()];
-}
-
-/** Longest straight run among the matched cells, across rows and columns (for the 4- and 5-in-a-row bonus). */
-function longestRun(cells: Cell[]): number {
-  const key = (c: number, r: number) => `${c},${r}`;
-  const set = new Set(cells.map((x) => key(x.col, x.row)));
-  let best = 0;
-  for (const x of cells) {
-    for (const [dc, dr] of [
-      [1, 0],
-      [0, 1],
-    ]) {
-      if (set.has(key(x.col - dc, x.row - dr))) continue; // count each run from its start
-      let n = 1;
-      while (set.has(key(x.col + dc * n, x.row + dr * n))) n++;
-      best = Math.max(best, n);
-    }
-  }
-  return best;
-}
-
-export function canRise(col: Column, cfg: RulesConfig): boolean {
-  return col.lift < cfg.board.maxLift && topRow(col) < cfg.board.rows - 1;
-}
-
-export function setHeld(state: GameState, col: number | null): void {
-  if (state.over) return;
-  if (col !== state.held) state.riseAcc = 0;
-  state.held = col;
-}
-
-/** Remove matched pots (gold pots take their whole row with them); stacks close up. Returns pots cleared. */
-function resolveMatches(state: GameState, cfg: RulesConfig): number {
-  const matched = findMatches(state.cols, cfg);
-  if (matched.length === 0) return 0;
-  const blastRows = [...new Set(matched.filter((c) => c.pot.kind === 'gold').map((c) => c.row))];
-  const cells = [...matched];
-  const seen = new Set(cells.map((c) => c.pot.id));
-  for (const row of blastRows) {
-    state.cols.forEach((col, c) => {
-      const p = potAt(col, row);
-      if (p && !seen.has(p.id)) {
-        seen.add(p.id);
-        cells.push({ col: c, row, pot: p });
+function stepLid(state: GameState, lane: number, pot: Pot, dt: number, cfg: RulesConfig): void {
+  const lid = pot.lid;
+  const sec = dt / 1000;
+  switch (lid.phase) {
+    case 'hung':
+      lid.timer = Math.max(0, lid.timer - dt);
+      break;
+    case 'wobble':
+      lid.timer -= dt;
+      if (lid.timer <= 0) {
+        lid.phase = 'fall';
+        lid.v = 0;
+        state.events.push({ type: 'fall', lane });
       }
-    });
+      break;
+    case 'fall':
+      lid.v += gravityFor(state.level, lid.kind, cfg) * sec;
+      lid.y -= lid.v * sec;
+      if (pot.h >= cfg.snakes.guardMin && lid.y <= pot.h) {
+        lid.y = pot.h;
+        pot.h = Math.max(0, pot.h - cfg.lids.knock * (lid.kind === 'iron' ? cfg.lids.ironMult : 1));
+        lid.phase = 'bounce';
+        lid.v = 0;
+        const combo = bumpCombo(state, cfg);
+        const points = cfg.scoring.save * combo;
+        state.score += points;
+        state.saves++;
+        state.events.push({ type: 'save', lane, y: lid.y, points, combo });
+      } else if (lid.y <= 0) {
+        seal(state, lane, cfg);
+      }
+      break;
+    case 'bounce':
+      lid.y += cfg.lids.bounceSpeed * sec;
+      if (lid.y >= 1) {
+        lid.y = 1;
+        lid.phase = 'hung';
+        lid.timer = cfg.lids.restMs;
+      }
+      break;
+    case 'sealed':
+      lid.timer -= dt;
+      if (lid.timer <= 0) {
+        lid.phase = 'bounce';
+        state.events.push({ type: 'reopen', lane });
+      }
+      break;
   }
-
-  state.chain += 1;
-  state.bestChain = Math.max(state.bestChain, state.chain);
-  const longest = longestRun(matched);
-  const s = cfg.scoring;
-  const mult = Math.min(state.chain, s.chainCap) * (state.feverTime > 0 ? cfg.fever.pointsMult : 1);
-  const bonus = longest >= 5 ? s.fiveBonus : longest >= 4 ? s.fourBonus : 0;
-  const points = (cells.length * s.perPot + bonus) * mult;
-
-  for (const col of state.cols) col.pots = col.pots.filter((p) => !seen.has(p.id));
-  state.score += points;
-  state.stageCleared += cells.length;
-  state.totalCleared += cells.length;
-  state.chainTimer = cfg.pace.chainPauseMs;
-  state.events.push({ type: 'clear', cells, chain: state.chain, points, longest, blastRows });
-
-  if (state.feverTime <= 0) {
-    state.fever += cells.length * cfg.fever.perPot * (1 + (state.chain - 1) * cfg.fever.chainBoost);
-    if (state.fever >= 1) {
-      state.fever = 0;
-      state.feverTime = cfg.fever.durationMs;
-      state.events.push({ type: 'fever', on: true });
-    }
-  }
-
-  const target = stageTarget(state.stage, cfg);
-  if (state.stageCleared >= target) {
-    state.stageCleared -= target;
-    state.stage += 1;
-    state.colors = colorsForStage(state.stage, cfg);
-    state.score += cfg.scoring.stageBonus;
-    state.events.push({ type: 'stage', stage: state.stage, bonus: cfg.scoring.stageBonus });
-  }
-  return cells.length;
 }
 
-/** Lids favour the emptier columns (weight = free slots ^ dropBias), so gaps refill and rows stay matchable. */
-export function pickDropColumn(state: GameState, cfg: RulesConfig): number {
-  const weights = state.cols.map((col) => Math.pow(Math.max(0, cfg.board.rows - col.pots.length), cfg.pace.dropBias));
-  const total = weights.reduce((a, b) => a + b, 0);
-  if (total <= 0) return randomInt(state, state.cols.length);
-  let r = nextRandom(state) * total;
-  for (let c = 0; c < weights.length; c++) {
-    r -= weights[c];
-    if (r < 0) return c;
-  }
-  return weights.length - 1;
-}
-
-function planNextDrop(state: GameState, cfg: RulesConfig): void {
-  const col = pickDropColumn(state, cfg);
-  state.nextDrop = { col, pot: rollLid(state, col, cfg) };
-}
-
-/** ms until the planned lid lands (Infinity during fever, when lids are paused). */
-export function msToDrop(state: GameState, cfg: RulesConfig): number {
-  if (state.feverTime > 0) return Infinity;
-  return Math.max(0, currentDropInterval(state, cfg) - state.dropAcc);
-}
-
-function dropLid(state: GameState, cfg: RulesConfig): void {
-  const { col: c, pot } = state.nextDrop;
-  const col = state.cols[c];
-  if (col.pots.length >= cfg.board.rows) {
-    state.over = true;
-    state.held = null;
-    state.events.push({ type: 'over', col: c });
-    return;
-  }
-  // A raised stack is never punished for being raised: the lid presses the snake down to make room.
-  if (col.lift + col.pots.length >= cfg.board.rows) {
-    col.lift -= 1;
-    state.events.push({ type: 'move', col: c, lift: col.lift });
-  }
-  dealColor(state, c, pot, cfg);
-  const row = col.lift + col.pots.length;
-  col.pots.push(pot);
-  state.events.push({ type: 'drop', col: c, row, pot });
-  planNextDrop(state, cfg);
-}
-
-/** Advance the game by dt milliseconds. Events since the last call are in state.events (caller clears them). */
 export function step(state: GameState, dt: number, cfg: RulesConfig): void {
   if (state.over) return;
   state.elapsed += dt;
-
-  if (state.feverTime > 0) {
-    state.feverTime -= dt;
-    if (state.feverTime <= 0) {
-      state.feverTime = 0;
-      state.events.push({ type: 'fever', on: false });
-    }
-  } else {
-    state.fever = Math.max(0, state.fever - (cfg.fever.decayPerSec * dt) / 1000);
+  if (state.combo > 0) {
+    state.comboTimer -= dt;
+    if (state.comboTimer <= 0) state.combo = 0;
   }
-
-  // A clear is in progress: the board holds still for a beat, then cascades or ends the chain.
-  if (state.chainTimer > 0) {
-    state.chainTimer -= dt;
-    if (state.chainTimer > 0) return;
-    state.chainTimer = 0;
-    if (resolveMatches(state, cfg) === 0) state.chain = 0;
+  if (state.breakTimer > 0) {
+    state.breakTimer -= dt;
+    if (state.breakTimer <= 0) startLevel(state, state.level + 1, cfg);
     return;
   }
+  if (state.introTimer > 0) state.introTimer -= dt;
 
-  const { riseMs, sinkMs } = cfg.pace;
-  let moved = false;
-  for (let c = 0; c < state.cols.length; c++) {
-    const col = state.cols[c];
-    if (c === state.held) {
-      state.sinkAcc[c] = 0;
-      state.riseAcc += dt;
-      while (state.riseAcc >= riseMs) {
-        state.riseAcc -= riseMs;
-        if (!canRise(col, cfg)) {
-          state.riseAcc = 0;
-          break;
-        }
-        col.lift += 1;
-        moved = true;
-        state.events.push({ type: 'move', col: c, lift: col.lift });
-        if (findMatches(state.cols, cfg).length) break;
-      }
-    } else if (col.lift > 0) {
-      state.sinkAcc[c] += dt;
-      if (state.sinkAcc[c] >= sinkMs) {
-        state.sinkAcc[c] -= sinkMs;
-        col.lift -= 1;
-        moved = true;
-        state.events.push({ type: 'move', col: c, lift: col.lift });
-      }
-    } else {
-      state.sinkAcc[c] = 0;
+  const sec = dt / 1000;
+  for (let lane = 0; lane < state.lanes.length; lane++) {
+    const pot = state.lanes[lane];
+    if (!pot) continue;
+    if (pot.lid.phase === 'sealed') pot.h = 0;
+    else if (state.held === lane) pot.h = Math.min(1, pot.h + riseFor(state.level, pot.kind, cfg) * sec);
+    else pot.h = Math.max(0, pot.h - cfg.snakes[pot.kind].sink * sec);
+    if (pot.h >= 1) {
+      charm(state, lane, cfg);
+      if (state.breakTimer > 0) return;
+      continue;
     }
+    stepLid(state, lane, pot, dt, cfg);
+    if (state.over) return;
   }
-  if (moved && resolveMatches(state, cfg) > 0) return;
 
-  if (state.feverTime > 0) return; // fever: the vine holds its lids
-  state.dropAcc += dt;
-  const interval = currentDropInterval(state, cfg);
-  if (state.dropAcc >= interval) {
-    state.dropAcc -= interval;
-    dropLid(state, cfg);
-    if (!state.over) resolveMatches(state, cfg);
+  if (state.introTimer > 0) return;
+  state.lidTimer -= dt;
+  if (state.lidTimer <= 0) {
+    // When no lid can go yet (all resting, or too many in the air), try again shortly.
+    state.lidTimer = releaseLid(state, cfg) ? nextLidMs(state, cfg) : 150;
   }
 }
 
-export interface LiftPlan {
-  col: number;
-  lift: number;
-  gain: number;
-}
-
-/**
- * The lift that clears the most pots if one column moved there and the rest stayed put. Used by the demo bot
- * (and a future hint); null when no single lift clears anything.
- */
-export function bestLift(state: GameState, cfg: RulesConfig): LiftPlan | null {
-  let best: LiftPlan | null = null;
-  for (let c = 0; c < state.cols.length; c++) {
-    const col = state.cols[c];
-    const highest = Math.min(cfg.board.maxLift, cfg.board.rows - col.pots.length);
-    for (let lift = 0; lift <= highest; lift++) {
-      if (lift === col.lift || col.pots.length === 0) continue;
-      const trial = state.cols.map((x, i) => (i === c ? { lift, pots: x.pots } : x));
-      const gain = findMatches(trial, cfg).length;
-      if (gain === 0) continue;
-      const better =
-        !best || gain > best.gain || (gain === best.gain && Math.abs(lift - col.lift) < Math.abs(best.lift - col.lift));
-      if (better) best = { col: c, lift, gain };
-    }
-  }
-  return best;
+/** Seconds until a lid reaches height y (null if it is not wobbling or falling). Used by the bot and the view. */
+export function secondsToReach(state: GameState, lane: number, y: number, cfg: RulesConfig): number | null {
+  const pot = state.lanes[lane];
+  if (!pot) return null;
+  const lid = pot.lid;
+  if (lid.phase !== 'wobble' && lid.phase !== 'fall') return null;
+  const g = gravityFor(state.level, lid.kind, cfg);
+  const drop = Math.max(0, lid.y - y);
+  const v = lid.phase === 'fall' ? lid.v : 0;
+  // drop = v t + g t^2 / 2
+  const t = (-v + Math.sqrt(v * v + 2 * g * drop)) / g;
+  return t + (lid.phase === 'wobble' ? lid.timer / 1000 : 0);
 }
