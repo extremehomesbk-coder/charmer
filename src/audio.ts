@@ -4,9 +4,8 @@
  * is safe without audio.
  */
 import { CONFIG } from './config';
+import type { PungiSkin } from './meta';
 
-// Double harmonic scale (semitones), the snake-charmer sound; the melody wanders over two octaves of it.
-const SCALE = [0, 1, 4, 5, 7, 8, 11, 12, 13, 16, 17, 19];
 const LANE_STEP = [0, 2, 4, 5, 7, 9, 11]; // each lane's tonic, a step up the major scale
 
 interface Voice {
@@ -25,7 +24,18 @@ export class Sound {
   private lane: number | null = null;
   private degree = 4;
   private noteTimer = 0;
+  private skin = CONFIG.skins.pungi.classic;
   muted = false;
+
+  /** Each pungi skin has its own scale and timbre (CONFIG.skins.pungi). */
+  setSkin(skin: PungiSkin): void {
+    this.skin = CONFIG.skins.pungi[skin] ?? CONFIG.skins.pungi.classic;
+    if (this.voice && this.lane !== null) {
+      const lane = this.lane;
+      this.stopVoice();
+      this.charm(lane);
+    }
+  }
 
   private context(): AudioContext | null {
     if (this.muted) return null;
@@ -67,18 +77,19 @@ export class Sound {
     const filter = ctx.createBiquadFilter();
     const nasal = ctx.createBiquadFilter();
     const gain = ctx.createGain();
-    osc.type = 'sawtooth';
-    osc2.type = 'square';
+    const sk = this.skin;
+    osc.type = sk.waves[0] as OscillatorType;
+    osc2.type = sk.waves[1] as OscillatorType;
     osc2.detune.value = 8;
-    lfo.frequency.value = 6; // vibrato
+    lfo.frequency.value = sk.vibrato; // vibrato
     lfoGain.gain.value = 7;
     lfo.connect(lfoGain);
     lfoGain.connect(osc.frequency);
     lfoGain.connect(osc2.frequency);
     filter.type = 'lowpass';
-    filter.frequency.value = 2200;
+    filter.frequency.value = sk.filter;
     nasal.type = 'peaking';
-    nasal.frequency.value = 1400;
+    nasal.frequency.value = sk.nasal;
     nasal.gain.value = 9;
     nasal.Q.value = 2;
     gain.gain.value = 0;
@@ -102,7 +113,8 @@ export class Sound {
   private glide(jump = false): void {
     const ctx = this.ctx;
     if (!ctx || !this.voice || this.lane === null) return;
-    const f = this.hz(this.tonic(this.lane) + SCALE[this.degree]);
+    const scale = this.skin.scale;
+    const f = this.hz(this.tonic(this.lane) + scale[Math.min(this.degree, scale.length - 1)]);
     const t = ctx.currentTime;
     for (const o of [this.voice.osc, this.voice.osc2]) {
       if (jump) o.frequency.setValueAtTime(f, t);
@@ -118,7 +130,7 @@ export class Sound {
     this.noteTimer = 0;
     const r = Math.random();
     const move = r < 0.4 ? -1 : r < 0.8 ? 1 : r < 0.9 ? 2 : -2;
-    this.degree = Math.max(0, Math.min(SCALE.length - 1, this.degree + move));
+    this.degree = Math.max(0, Math.min(this.skin.scale.length - 1, this.degree + move));
     this.glide();
   }
 
@@ -213,6 +225,28 @@ export class Sound {
     [0, 4, 7, 12, 16, 19, 24].forEach((st, i) =>
       this.tone('triangle', this.hz(12 + st), this.hz(12 + st), i * 0.08, 0.3, 0.12),
     );
+  }
+
+  /** Flowers banked or a pouch opened: a little glissando of chimes. */
+  coins(n = 3): void {
+    if (!this.context()) return;
+    for (let i = 0; i < Math.min(n, 8); i++)
+      this.tone('sine', this.hz(19 + i * 2), this.hz(19 + i * 2), i * 0.05, 0.18, 0.1);
+  }
+
+  /** A new breed tamed. */
+  tamed(): void {
+    if (!this.context()) return;
+    [0, 7, 12, 19, 24].forEach((st, i) =>
+      this.tone('triangle', this.hz(st + 7), this.hz(st + 7), i * 0.09, 0.35, 0.13),
+    );
+    this.hiss(0.3, 0.5, 0.05, 7000);
+  }
+
+  /** The continue offer's clock. */
+  tick2(): void {
+    if (!this.context()) return;
+    this.tone('square', 1100, 900, 0, 0.04, 0.03);
   }
 
   /** Game over. */

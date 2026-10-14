@@ -7,10 +7,14 @@
 import type { GameConfig } from '../config';
 import { nextRandom, randomInt } from './rng';
 
-export type RulesConfig = Pick<GameConfig, 'board' | 'snakes' | 'lids' | 'levels' | 'scoring'>;
+export type RulesConfig = Pick<GameConfig, 'board' | 'snakes' | 'lids' | 'levels' | 'scoring' | 'flowers' | 'meta'>;
 
-/** green: the plain snake; gold: slow to charm, worth more; sleepy: slips back fast when the flute stops. */
-export type SnakeKind = 'green' | 'gold' | 'sleepy';
+/**
+ * green: the plain snake; gold: slow to charm, worth more; sleepy: slips back fast when the flute stops;
+ * ruby: quick and jumpy; moon: calm, only out after dark; king: slow and heavy, worth the most.
+ */
+export type SnakeKind = 'green' | 'gold' | 'sleepy' | 'ruby' | 'moon' | 'king';
+export const SNAKE_KINDS: SnakeKind[] = ['green', 'gold', 'sleepy', 'ruby', 'moon', 'king'];
 export type LidKind = 'clay' | 'iron';
 /** hung: on the vine; wobble: about to drop; fall; bounce: flying back up; sealed: sitting on its pot. */
 export type LidPhase = 'hung' | 'wobble' | 'fall' | 'bounce' | 'sealed';
@@ -21,6 +25,7 @@ export interface Lid {
   y: number; // height of the lid's bottom
   v: number; // falling speed, climbs per second
   timer: number; // ms left: rest while hung, wobble, or sealed
+  bounces: number; // times a snake has knocked it back: each makes it rest less and drop with less warning
 }
 
 export interface Pot {
@@ -38,9 +43,10 @@ export type GameEvent =
   | { type: 'save'; lane: number; y: number; points: number; combo: number }
   | { type: 'seal'; lane: number }
   | { type: 'reopen'; lane: number }
-  | { type: 'charm'; lane: number; pot: Pot; points: number; combo: number }
-  | { type: 'clear'; level: number; bonus: number; perfect: boolean }
-  | { type: 'over'; lane: number };
+  | { type: 'charm'; lane: number; pot: Pot; points: number; combo: number; flowers: number }
+  | { type: 'clear'; level: number; bonus: number; perfect: boolean; flowers: number }
+  | { type: 'over'; lane: number }
+  | { type: 'revive'; lanes: number[] }; // a continue blew these pots away
 
 export interface GameState {
   lanes: (Pot | null)[];
@@ -56,11 +62,20 @@ export interface GameState {
   charmed: number;
   saves: number;
   landed: number;
+  flowers: number; // earned this run, banked when it ends
+  charmedByKind: Partial<Record<SnakeKind, number>>;
+  revived: boolean; // the one continue per run is spent
+  night: boolean; // moon snakes are out
   elapsed: number;
   over: boolean;
   rng: number;
   nextId: number;
   events: GameEvent[];
+}
+
+/** Night by the phone's clock: moon snakes come out between nightFrom and nightTo. */
+export function isNight(hour: number, cfg: RulesConfig): boolean {
+  return hour >= cfg.levels.nightFrom || hour < cfg.levels.nightTo;
 }
 
 const pow = (base: number, level: number) => Math.pow(base, level - 1);
@@ -84,6 +99,11 @@ export function riseFor(level: number, kind: SnakeKind, cfg: RulesConfig): numbe
   return cfg.snakes[kind].rise * mult;
 }
 
+/** A bounced lid gets meaner: its wobble (and its rest on the vine) shrink by lids.meaner per bounce. */
+export function meanerMs(ms: number, bounces: number, cfg: RulesConfig): number {
+  return Math.max(cfg.lids.meanerMinMs, ms * Math.pow(cfg.lids.meaner, bounces));
+}
+
 export function maxAirForLevel(level: number, cfg: RulesConfig): number {
   return Math.min(cfg.lids.maxAirCap, 1 + Math.floor((level - 1) / cfg.lids.maxAirEvery));
 }
@@ -104,18 +124,34 @@ function nextLidMs(state: GameState, cfg: RulesConfig): number {
   return lidIntervalForLevel(state.level, cfg) * crowd * (1 - j + 2 * j * nextRandom(state));
 }
 
+/** Which breed a new pot holds: the rarer breeds are rolled first, each only from its level on. */
+export function rollKind(state: GameState, roll: number, cfg: RulesConfig): SnakeKind {
+  const lv = cfg.levels;
+  const table: [SnakeKind, number, number, boolean][] = [
+    ['king', lv.kingFrom, lv.kingRate, true],
+    ['moon', lv.moonFrom, lv.moonRate, state.night],
+    ['ruby', lv.rubyFrom, lv.rubyRate, true],
+    ['sleepy', lv.sleepyFrom, lv.sleepyRate, true],
+    ['gold', lv.goldFrom, lv.goldRate, true],
+  ];
+  let edge = 0;
+  for (const [kind, from, rate, allowed] of table) {
+    if (!allowed || state.level < from) continue;
+    edge += rate;
+    if (roll < edge) return kind;
+  }
+  return 'green';
+}
+
 function newPot(state: GameState, cfg: RulesConfig, restMs: number): Pot {
   const lv = cfg.levels;
-  const roll = nextRandom(state);
-  let kind: SnakeKind = 'green';
-  if (state.level >= lv.sleepyFrom && roll < lv.sleepyRate) kind = 'sleepy';
-  else if (state.level >= lv.goldFrom && roll >= 1 - lv.goldRate) kind = 'gold';
+  const kind = rollKind(state, nextRandom(state), cfg);
   const iron = state.level >= lv.ironFrom && nextRandom(state) < lv.ironRate;
   return {
     id: state.nextId++,
     kind,
     h: 0,
-    lid: { kind: iron ? 'iron' : 'clay', phase: 'hung', y: 1, v: 0, timer: restMs },
+    lid: { kind: iron ? 'iron' : 'clay', phase: 'hung', y: 1, v: 0, timer: restMs, bounces: 0 },
   };
 }
 
@@ -135,8 +171,11 @@ function startLevel(state: GameState, level: number, cfg: RulesConfig): void {
   }
 }
 
-/** A new game. firstLevel > 1 starts further in (the ?level=N flag, for playtesting later levels). */
-export function createGame(seed: number, cfg: RulesConfig, firstLevel = 1): GameState {
+/**
+ * A new game. firstLevel > 1 starts further in (the ?level=N flag, for playtesting later levels); night lets
+ * moon snakes out.
+ */
+export function createGame(seed: number, cfg: RulesConfig, firstLevel = 1, night = false): GameState {
   const state: GameState = {
     lanes: Array.from({ length: cfg.board.lanes }, () => null),
     held: null,
@@ -151,6 +190,10 @@ export function createGame(seed: number, cfg: RulesConfig, firstLevel = 1): Game
     charmed: 0,
     saves: 0,
     landed: 0,
+    flowers: 0,
+    charmedByKind: {},
+    revived: false,
+    night,
     elapsed: 0,
     over: false,
     rng: seed | 0,
@@ -177,10 +220,13 @@ function charm(state: GameState, lane: number, cfg: RulesConfig): void {
   if (!pot) return;
   const combo = bumpCombo(state, cfg);
   const points = cfg.snakes[pot.kind].points * combo;
+  const flowers = cfg.flowers[pot.kind] + (combo >= cfg.flowers.comboFrom ? cfg.flowers.comboBonus : 0);
   state.score += points;
+  state.flowers += flowers;
   state.charmed++;
+  state.charmedByKind[pot.kind] = (state.charmedByKind[pot.kind] ?? 0) + 1;
   state.lanes[lane] = null;
-  state.events.push({ type: 'charm', lane, pot, points, combo });
+  state.events.push({ type: 'charm', lane, pot, points, combo, flowers });
   // The snake tugs the vine as it climbs into it: nearby hanging lids shake loose.
   const reach = cfg.lids.shakeReach;
   for (let i = Math.max(0, lane - reach); i <= Math.min(state.lanes.length - 1, lane + reach); i++) {
@@ -193,9 +239,11 @@ function charm(state: GameState, lane: number, cfg: RulesConfig): void {
   if (state.lanes.every((p) => p === null)) {
     const perfect = state.landedThisLevel === 0;
     const bonus = cfg.scoring.levelBonus * state.level + (perfect ? cfg.scoring.perfectBonus : 0);
+    const flowers = perfect ? cfg.flowers.perfect : 0;
     state.score += bonus;
+    state.flowers += flowers;
     state.breakTimer = cfg.levels.breakMs;
-    state.events.push({ type: 'clear', level: state.level, bonus, perfect });
+    state.events.push({ type: 'clear', level: state.level, bonus, perfect, flowers });
   }
 }
 
@@ -238,7 +286,7 @@ function releaseLid(state: GameState, cfg: RulesConfig): boolean {
   if (!ready.length) return false;
   const lane = ready[randomInt(state, ready.length)];
   const lid = (state.lanes[lane] as Pot).lid;
-  const ms = warnMsForLevel(state.level, cfg);
+  const ms = meanerMs(warnMsForLevel(state.level, cfg), lid.bounces, cfg);
   lid.phase = 'wobble';
   lid.timer = ms;
   state.events.push({ type: 'wobble', lane, ms });
@@ -268,6 +316,7 @@ function stepLid(state: GameState, lane: number, pot: Pot, dt: number, cfg: Rule
         pot.h = Math.max(0, pot.h - cfg.lids.knock * (lid.kind === 'iron' ? cfg.lids.ironMult : 1));
         lid.phase = 'bounce';
         lid.v = 0;
+        lid.bounces++;
         const combo = bumpCombo(state, cfg);
         const points = cfg.scoring.save * combo;
         state.score += points;
@@ -282,7 +331,7 @@ function stepLid(state: GameState, lane: number, pot: Pot, dt: number, cfg: Rule
       if (lid.y >= 1) {
         lid.y = 1;
         lid.phase = 'hung';
-        lid.timer = cfg.lids.restMs;
+        lid.timer = meanerMs(cfg.lids.restMs, lid.bounces, cfg);
       }
       break;
     case 'sealed':
@@ -331,6 +380,43 @@ export function step(state: GameState, dt: number, cfg: RulesConfig): void {
     // When no lid can go yet (all resting, or too many in the air), try again shortly.
     state.lidTimer = releaseLid(state, cfg) ? nextLidMs(state, cfg) : 150;
   }
+}
+
+/**
+ * One more tune: after a game over, blow away the pot the lid landed on and the next most threatened pots
+ * (meta.continueClears in all), put every lid back on the vine, and play on from the same level. Once per
+ * run; the caller charges the flowers. Returns the lanes cleared, or null when no continue is possible.
+ */
+export function revive(state: GameState, lane: number, cfg: RulesConfig): number[] | null {
+  if (!state.over || state.revived) return null;
+  const threat = (i: number): number => {
+    const p = state.lanes[i];
+    if (!p) return -Infinity;
+    if (i === lane) return Infinity;
+    if (p.lid.phase === 'sealed') return 3;
+    if (p.lid.phase === 'fall') return 2 - p.lid.y;
+    if (p.lid.phase === 'wobble') return 1;
+    return 0;
+  };
+  const order = state.lanes
+    .map((_, i) => i)
+    .filter((i) => state.lanes[i] !== null)
+    .sort((a, b) => threat(b) - threat(a));
+  const cleared = order.slice(0, cfg.meta.continueClears);
+  for (const i of cleared) state.lanes[i] = null;
+  for (const p of state.lanes) {
+    if (!p) continue;
+    p.h = 0;
+    p.lid = { ...p.lid, phase: 'hung', y: 1, v: 0, timer: cfg.lids.restMs + cfg.lids.spawnGraceMs, bounces: 0 };
+  }
+  state.over = false;
+  state.revived = true;
+  state.combo = 0;
+  state.introTimer = cfg.levels.introMs;
+  state.lidTimer = cfg.levels.introMs + nextLidMs(state, cfg);
+  state.events.push({ type: 'revive', lanes: cleared });
+  // Clearing the rug this way does not finish a level by itself; the next charm does.
+  return cleared;
 }
 
 /** Seconds until a lid reaches height y (null if it is not wobbling or falling). Used by the bot and the view. */

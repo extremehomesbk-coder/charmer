@@ -5,7 +5,9 @@ No third-party names, art or sound: the in-game title is **Snake Song** (working
 all sound is synthesized.
 
 v0.1-v0.2 drifted into a match-3 (stacks of coloured pots lifted by snakes) and did not play like the original
-at all. v0.3 rebuilt the rules around the original's loop and repainted everything.
+at all. v0.3 rebuilt the rules around the original's loop and repainted everything. v0.4 added the reason to
+come back: flowers, a snake collection, a daily pouch, a bazaar of flutes and themes, one continue per run, and
+a share card.
 
 ## One-line pitch
 
@@ -50,10 +52,24 @@ saved on the phone.
 
 ## Progression
 
-Level 1: 3 pots, slow lids. One more starting pot every 2 levels (max 4 of 5 spots, so one mistake is always
+Two loops. Inside a run: level 1: 3 pots, slow lids. One more starting pot every 2 levels (max 4 of 5 spots, so one mistake is always
 survivable). Each level: lids come more often, wobble shorter and fall faster, snakes climb a little slower;
 gold snakes from level 2, iron lids from level 3, sleepy snakes from level 4. More pots on the rug also means
-more lids, so mistakes snowball, and fewer pots means fewer lids, so a level can always be finished.
+more lids, so mistakes snowball, and fewer pots means fewer lids, so a level can always be finished. Six
+breeds: green, gold, sleepy, ruby (quick), moon (night only, by the phone's clock) and the king cobra.
+
+Across runs (v0.4): flowers earned by charming are banked and spent at the bazaar; charms per breed add up
+until the breed is tamed and takes a pot on the title screen; a daily pouch rewards a streak (day 7 tames a
+ruby racer); a continue can be bought once per run. The owner asked for the "I need to pay for this" factor;
+the honest answer was that paying follows caring, so v0.4 builds the loop that makes a player care, with the
+pay points (continue, cosmetics, a licence) sitting on it. Flowers only until money can change hands.
+
+## Why someone would pay (the plan, not built)
+
+Nothing costs money on the web build. When the store wrapper or Stripe arrives, the SKUs are: a Charmer's
+Licence (one purchase: no ads, 2x flowers, a golden pungi), flower pouches, and direct cosmetic buys. No
+real-money loot boxes. The prototype measures intent meanwhile: how often players reach the continue offer and
+take it, and how often they open the bazaar (local counters, `?stats=1`).
 
 ## Feel: animations that must read without sound
 
@@ -74,6 +90,10 @@ cobras: big eyes, blush, a smile, a patterned hood, belly scales down a bending 
 it is painted in code with canvas gradients (src/art.ts) at 2x for a sharp phone screen.
 
 ## Open questions
+
+- Are the flower prices right? A casual run earns ~75 flowers (sim), so a skin is one or two runs and a theme
+  two or three: deliberately quick for the first buys, to teach that the stall is worth visiting.
+- Is one continue per run enough pressure, or should the second cost more rather than be refused?
 
 - Does a one-flute game feel right on a phone, or should two thumbs charm two snakes at once? (Today the
   latest finger wins; the other finger takes the flute back when lifted.)

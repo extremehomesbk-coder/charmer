@@ -5,7 +5,8 @@
  */
 import Phaser from 'phaser';
 import { CONFIG } from './config';
-import type { SnakeKind } from './model/game';
+import { PUNGI_SKINS, THEMES, type PungiSkin, type Theme } from './meta';
+import { SNAKE_KINDS, type SnakeKind } from './model/game';
 
 const R = CONFIG.layout.renderScale;
 const L = CONFIG.layout;
@@ -15,10 +16,20 @@ const TAU = Math.PI * 2;
 
 type Ctx = CanvasRenderingContext2D;
 
-export const KINDS: SnakeKind[] = ['green', 'gold', 'sleepy'];
+export const KINDS: SnakeKind[] = SNAKE_KINDS;
 
 /** [back, belly, pattern] colours of each snake. */
-export const SKIN: Record<SnakeKind, number[]> = { green: C.green, gold: C.goldSkin, sleepy: C.sleepy };
+export const SKIN: Record<SnakeKind, number[]> = {
+  green: C.green,
+  gold: C.goldSkin,
+  sleepy: C.sleepy,
+  ruby: C.ruby,
+  moon: C.moon,
+  king: C.king,
+};
+
+type ThemeLook = (typeof CONFIG.skins.themes)[Theme];
+type PungiLook = (typeof CONFIG.skins.pungi)[PungiSkin];
 
 function tex(scene: Phaser.Scene, key: string, w: number, h: number, draw: (ctx: Ctx) => void): void {
   if (scene.textures.exists(key)) return;
@@ -202,71 +213,108 @@ function lanternString(ctx: Ctx, x1: number, y1: number, x2: number, y2: number,
   }
 }
 
-function background(scene: Phaser.Scene): void {
-  tex(scene, 'bg', L.width, L.height, (ctx) => {
+function moonDisc(ctx: Ctx, mx: number, my: number, alpha: number): void {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  glow(ctx, mx, my, 170, 'rgba(255,200,150,0.22)');
+  glow(ctx, mx, my, 70, 'rgba(255,230,190,0.35)');
+  const mg = ctx.createRadialGradient(mx - 12, my - 12, 4, mx, my, 40);
+  mg.addColorStop(0, '#fffbea');
+  mg.addColorStop(0.7, '#ffe6b5');
+  mg.addColorStop(1, '#f4c48e');
+  ellipse(ctx, mx, my, 38, 38, mg);
+  for (const [cx, cy, cr] of [
+    [-12, -8, 7],
+    [10, 6, 9],
+    [-4, 16, 5],
+    [14, -14, 4],
+    [-18, 10, 3.5],
+  ]) {
+    ellipse(ctx, mx + cx, my + cy, cr, cr, 'rgba(214,160,110,0.32)');
+    ellipse(ctx, mx + cx + 0.8, my + cy + 0.8, cr * 0.7, cr * 0.7, 'rgba(255,240,210,0.25)');
+  }
+  ctx.restore();
+}
+
+function sunDisc(ctx: Ctx, sx: number, sy: number): void {
+  glow(ctx, sx, sy, 230, 'rgba(255,245,200,0.35)');
+  glow(ctx, sx, sy, 90, 'rgba(255,255,230,0.6)');
+  const g = ctx.createRadialGradient(sx, sy, 2, sx, sy, 30);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(0.6, '#fff6c8');
+  g.addColorStop(1, '#ffd36b');
+  ellipse(ctx, sx, sy, 30, 30, g);
+}
+
+function cloudBank(ctx: Ctx, y: number, seed: number, dark: string, light: string): void {
+  const rnd = decoRand(seed);
+  for (let i = 0; i < 9; i++) {
+    const x = -20 + rnd() * (L.width + 40);
+    const w = 70 + rnd() * 90;
+    const h = 16 + rnd() * 14;
+    const cy = y + (rnd() - 0.5) * 60;
+    ctx.save();
+    ctx.globalAlpha = 0.55 + rnd() * 0.3;
+    ellipse(ctx, x, cy, w, h, dark);
+    ellipse(ctx, x - w * 0.2, cy - h * 0.45, w * 0.45, h * 0.6, dark);
+    ellipse(ctx, x + w * 0.25, cy - h * 0.35, w * 0.4, h * 0.55, dark);
+    ctx.globalAlpha = 0.25;
+    ellipse(ctx, x - w * 0.1, cy - h * 0.55, w * 0.7, h * 0.3, light);
+    ctx.restore();
+  }
+}
+
+/** One painted backdrop per theme (CONFIG.skins.themes): sky, light, skyline, terrace wall and rug. */
+function background(scene: Phaser.Scene, theme: Theme, look: ThemeLook): void {
+  tex(scene, `bg_${theme}`, L.width, L.height, (ctx) => {
     const W = L.width;
     const H = L.height;
     const sky = ctx.createLinearGradient(0, 0, 0, 640);
-    sky.addColorStop(0, '#120a30');
-    sky.addColorStop(0.3, '#2a1660');
-    sky.addColorStop(0.58, '#5e2a85');
-    sky.addColorStop(0.8, '#b8497f');
-    sky.addColorStop(1, '#ff9f6b');
+    look.sky.forEach((c, i) => sky.addColorStop([0, 0.3, 0.58, 0.8, 1][i], c));
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, H);
 
-    const rnd = decoRand(11);
-    for (let i = 0; i < 170; i++) {
-      const x = rnd() * W;
-      const y = rnd() * 430;
-      const r = rnd() * 1.1 + 0.25;
-      ctx.globalAlpha = Math.max(0, 1 - y / 470) * (0.35 + rnd() * 0.65);
-      ellipse(ctx, x, y, r, r, '#ffffff');
+    if (look.stars) {
+      const rnd = decoRand(11);
+      for (let i = 0; i < 170; i++) {
+        const x = rnd() * W;
+        const y = rnd() * 430;
+        const r = rnd() * 1.1 + 0.25;
+        ctx.globalAlpha = Math.max(0, 1 - y / 470) * (0.35 + rnd() * 0.65);
+        ellipse(ctx, x, y, r, r, '#ffffff');
+      }
+      ctx.globalAlpha = 1;
     }
-    ctx.globalAlpha = 1;
-
-    // full moon with a warm halo
-    const mx = 92;
-    const my = 300;
-    glow(ctx, mx, my, 170, 'rgba(255,200,150,0.22)');
-    glow(ctx, mx, my, 70, 'rgba(255,230,190,0.35)');
-    const mg = ctx.createRadialGradient(mx - 12, my - 12, 4, mx, my, 40);
-    mg.addColorStop(0, '#fffbea');
-    mg.addColorStop(0.7, '#ffe6b5');
-    mg.addColorStop(1, '#f4c48e');
-    ellipse(ctx, mx, my, 38, 38, mg);
-    for (const [cx, cy, cr] of [
-      [-12, -8, 7],
-      [10, 6, 9],
-      [-4, 16, 5],
-      [14, -14, 4],
-      [-18, 10, 3.5],
-    ]) {
-      ellipse(ctx, mx + cx, my + cy, cr, cr, 'rgba(214,160,110,0.32)');
-      ellipse(ctx, mx + cx + 0.8, my + cy + 0.8, cr * 0.7, cr * 0.7, 'rgba(255,240,210,0.25)');
+    if (look.light === 'moon') moonDisc(ctx, 92, 300, 1);
+    else if (look.light === 'sun') sunDisc(ctx, 300, 150);
+    else {
+      moonDisc(ctx, 92, 300, 0.45);
+      cloudBank(ctx, 250, 21, look.skyline[0], '#9fb6c9');
+      cloudBank(ctx, 380, 33, look.skyline[1], '#7f97ab');
     }
 
     lanternString(ctx, -10, 452, 190, 470, 26, 3);
     lanternString(ctx, 170, 470, W + 10, 440, 30, 5);
-    skyline(ctx, 560, '#3b1d63', 0.25, 4, 0.8);
-    palm(ctx, 26, 600, 90, 18, '#2a1248');
-    palm(ctx, 360, 600, 104, -22, '#2a1248');
-    skyline(ctx, 612, '#26103f', 0.2, 9, 1.05);
+    const lit = look.light === 'sun' ? 0 : 0.25;
+    skyline(ctx, 560, look.skyline[0], lit, 4, 0.8);
+    palm(ctx, 26, 600, 90, 18, look.palm);
+    palm(ctx, 360, 600, 104, -22, look.palm);
+    skyline(ctx, 612, look.skyline[1], lit * 0.8, 9, 1.05);
 
-    // sandstone terrace wall
+    // terrace wall
     const wallTop = 606;
     const wg = ctx.createLinearGradient(0, wallTop, 0, 712);
-    wg.addColorStop(0, '#c98656');
-    wg.addColorStop(1, '#7e4430');
+    wg.addColorStop(0, look.wall[0]);
+    wg.addColorStop(1, look.wall[1]);
     ctx.fillStyle = wg;
     ctx.fillRect(0, wallTop, W, 110);
-    ctx.fillStyle = 'rgba(70,25,30,0.45)';
+    ctx.fillStyle = 'rgba(40,20,30,0.45)';
     for (let x = 8; x < W; x += 39) arch(ctx, x, wallTop + 22, 24, 80);
     ctx.fillStyle = 'rgba(255,214,150,0.18)';
     for (let x = 8; x < W; x += 39) ctx.fillRect(x - 3, wallTop + 22, 1.5, 80);
     const cap = ctx.createLinearGradient(0, wallTop - 6, 0, wallTop + 8);
-    cap.addColorStop(0, '#ffd29a');
-    cap.addColorStop(1, '#b8703f');
+    cap.addColorStop(0, look.cap[0]);
+    cap.addColorStop(1, look.cap[1]);
     ctx.fillStyle = cap;
     ctx.fillRect(0, wallTop - 6, W, 14);
     ctx.fillStyle = 'rgba(60,20,20,0.35)';
@@ -275,16 +323,16 @@ function background(scene: Phaser.Scene): void {
     // the rug
     const rugTop = 712;
     const rg = ctx.createLinearGradient(0, rugTop, 0, H);
-    rg.addColorStop(0, '#7a1828');
-    rg.addColorStop(1, '#5a0f1f');
+    rg.addColorStop(0, look.rug[0]);
+    rg.addColorStop(1, look.rug[1]);
     ctx.fillStyle = rg;
     ctx.fillRect(0, rugTop, W, H - rugTop);
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(0, rugTop, W, 4);
     const band = (y: number, h: number) => {
-      ctx.fillStyle = '#e2a640';
+      ctx.fillStyle = look.bands[0];
       ctx.fillRect(0, y, W, h);
-      ctx.fillStyle = '#1f6f72';
+      ctx.fillStyle = look.bands[1];
       for (let x = 0; x < W + 12; x += 12) {
         ctx.beginPath();
         ctx.moveTo(x, y + h / 2);
@@ -294,12 +342,10 @@ function background(scene: Phaser.Scene): void {
         ctx.closePath();
         ctx.fill();
       }
-      ctx.fillStyle = 'rgba(255,240,200,0.8)';
       for (let x = 6; x < W + 12; x += 12) ellipse(ctx, x, y + h / 2, 1.2, 1.2, 'rgba(255,240,200,0.9)');
     };
     band(rugTop + 10, 11);
     band(H - 26, 11);
-    // field motifs
     ctx.fillStyle = 'rgba(30,8,20,0.35)';
     for (let y = rugTop + 34; y < H - 34; y += 22) {
       for (let x = ((y / 22) % 2) * 15; x < W + 15; x += 30) {
@@ -313,7 +359,6 @@ function background(scene: Phaser.Scene): void {
         ellipse(ctx, x, y, 2, 2, 'rgba(240,170,80,0.55)');
       }
     }
-    // tassels along the top edge
     ctx.strokeStyle = 'rgba(255,230,180,0.75)';
     ctx.lineWidth = 1;
     for (let x = 3; x < W; x += 6) {
@@ -322,12 +367,47 @@ function background(scene: Phaser.Scene): void {
       ctx.lineTo(x + 0.5, rugTop + 7);
       ctx.stroke();
     }
-    // a little evening haze where the city meets the wall
     const haze = ctx.createLinearGradient(0, 520, 0, 610);
-    haze.addColorStop(0, 'rgba(255,150,120,0)');
-    haze.addColorStop(1, 'rgba(255,150,120,0.18)');
+    haze.addColorStop(0, 'rgba(0,0,0,0)');
+    haze.addColorStop(1, look.haze);
     ctx.fillStyle = haze;
     ctx.fillRect(0, 520, W, 90);
+  });
+  // a thumbnail for the bazaar: sky, light, skyline, rug
+  tex(scene, `swatch_${theme}`, 120, 72, (ctx) => {
+    ctx.beginPath();
+    ctx.roundRect(0, 0, 120, 72, 10);
+    ctx.clip();
+    const sky = ctx.createLinearGradient(0, 0, 0, 52);
+    look.sky.forEach((c, i) => sky.addColorStop([0, 0.3, 0.58, 0.8, 1][i], c));
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, 120, 72);
+    if (look.light === 'sun') {
+      glow(ctx, 88, 16, 26, 'rgba(255,255,220,0.8)');
+      ellipse(ctx, 88, 16, 8, 8, '#fff6c8');
+    } else {
+      glow(ctx, 30, 20, 22, 'rgba(255,220,180,0.5)');
+      ellipse(ctx, 30, 20, 8, 8, look.light === 'moon' ? '#fff1cf' : 'rgba(255,241,207,0.5)');
+    }
+    if (look.light === 'cloud') {
+      ellipse(ctx, 50, 28, 30, 7, look.skyline[0]);
+      ellipse(ctx, 95, 36, 26, 6, look.skyline[1]);
+    }
+    ctx.fillStyle = look.skyline[1];
+    for (let x = -4; x < 124; x += 17) {
+      const h = 12 + ((x * 7) % 11);
+      ctx.fillRect(x, 50 - h, 13, h + 4);
+      ellipse(ctx, x + 6.5, 50 - h, 5.5, 4, look.skyline[1]);
+    }
+    const rg = ctx.createLinearGradient(0, 52, 0, 72);
+    rg.addColorStop(0, look.rug[0]);
+    rg.addColorStop(1, look.rug[1]);
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 52, 120, 20);
+    ctx.fillStyle = look.bands[0];
+    ctx.fillRect(0, 56, 120, 4);
+    ctx.fillStyle = look.bands[1];
+    for (let x = 0; x < 120; x += 8) ctx.fillRect(x, 57, 4, 2);
   });
 }
 
@@ -468,6 +548,9 @@ function blooms(scene: Phaser.Scene): void {
     green: ['#ffb3d9', '#e0357d'],
     gold: ['#fff1a8', '#f29a12'],
     sleepy: ['#d6dcff', '#6a5cff'],
+    ruby: ['#ffb0b8', '#c2102c'],
+    moon: ['#ffffff', '#a9b4ff'],
+    king: ['#ffe08a', '#d4600f'],
   };
   for (const kind of KINDS) {
     const [light, dark] = petals[kind];
@@ -543,6 +626,33 @@ const POT_LOOK: Record<SnakeKind, PotLook> = {
     band: '#e4e9ff',
     ink: '#f5c542',
   },
+  ruby: {
+    light: '#ff9fb0',
+    mid: '#c9203f',
+    dark: '#5a0a1c',
+    rim: '#ff8fa6',
+    rimDark: '#6e0f24',
+    band: '#fff0f3',
+    ink: '#2b0b14',
+  },
+  moon: {
+    light: '#7f8fd6',
+    mid: '#2a3270',
+    dark: '#0e1236',
+    rim: '#aab6ff',
+    rimDark: '#1c2460',
+    band: '#1a2050',
+    ink: '#f3f6ff',
+  },
+  king: {
+    light: '#6a6a6a',
+    mid: '#262626',
+    dark: '#050505',
+    rim: '#ffd36b',
+    rimDark: '#8a5a00',
+    band: '#ffd36b',
+    ink: '#b8302a',
+  },
 };
 
 const RIM_RX = 26;
@@ -566,7 +676,7 @@ function potBand(ctx: Ctx, kind: SnakeKind, look: PotLook): void {
   ctx.fillStyle = look.band;
   ctx.fillRect(-40, 33, 80, 13);
   ctx.fillStyle = look.ink;
-  if (kind === 'sleepy') {
+  if (kind === 'sleepy' || kind === 'moon') {
     // moons and stars
     for (let x = -30; x <= 30; x += 15) {
       ctx.beginPath();
@@ -596,6 +706,19 @@ function potBand(ctx: Ctx, kind: SnakeKind, look: PotLook): void {
   if (kind === 'gold') {
     ellipse(ctx, 0, 64, 5, 6, '#e0303a');
     ellipse(ctx, -1.5, 62, 1.6, 2, 'rgba(255,255,255,0.8)');
+  }
+  if (kind === 'king') {
+    ctx.fillStyle = '#ffd36b';
+    ctx.beginPath();
+    ctx.moveTo(-9, 70);
+    ctx.lineTo(-9, 60);
+    ctx.lineTo(-4.5, 65);
+    ctx.lineTo(0, 58);
+    ctx.lineTo(4.5, 65);
+    ctx.lineTo(9, 60);
+    ctx.lineTo(9, 70);
+    ctx.closePath();
+    ctx.fill();
   }
 }
 
@@ -876,6 +999,11 @@ function headTextures(scene: Phaser.Scene): void {
       ctx.fillStyle = shade(belly, -0.05, 0.9);
       ctx.fill();
       for (const sx of [-1, 1]) {
+        if (kind === 'moon') {
+          ellipse(ctx, sx * hw * 0.3, hh * 0.42, 5.5, 5.5, shade(pat, 0));
+          ellipse(ctx, sx * hw * 0.3 + sx * 2.2, hh * 0.42 - 1, 4.6, 4.6, shade(belly, -0.05, 0.9));
+          continue;
+        }
         ellipse(ctx, sx * hw * 0.3, hh * 0.42, 5.5, 4.5, shade(pat, 0));
         ellipse(ctx, sx * hw * 0.3, hh * 0.42, 3, 2.3, shade(belly, 0.2));
         ellipse(ctx, sx * hw * 0.3, hh * 0.42, 1.3, 1.1, shade(pat, -0.2));
@@ -989,25 +1117,25 @@ function headTextures(scene: Phaser.Scene): void {
 
 // ---------------------------------------------------------------- the pungi (charmer's gourd flute)
 
-function pungi(scene: Phaser.Scene): void {
-  tex(scene, 'pungi', 48, 80, (ctx) => {
+function pungi(scene: Phaser.Scene, skin: PungiSkin, look: PungiLook): void {
+  tex(scene, `pungi_${skin}`, 48, 80, (ctx) => {
     ctx.translate(24, 0);
     // twin pipes, pointing up at the pot
     for (const x of [-5, 5]) {
       const g = ctx.createLinearGradient(x - 3.5, 0, x + 3.5, 0);
-      g.addColorStop(0, '#3d200d');
-      g.addColorStop(0.4, '#9a5a2a');
-      g.addColorStop(1, '#2e1608');
+      g.addColorStop(0, look.wood[0]);
+      g.addColorStop(0.4, look.wood[1]);
+      g.addColorStop(1, look.wood[2]);
       ctx.fillStyle = g;
       ctx.fillRect(x - 3.5, 3, 7, 30);
       ellipse(ctx, x, 3, 3.5, 1.5, '#1d0d04');
       for (const y of [8, 15, 22]) {
-        ctx.fillStyle = '#f3c14c';
+        ctx.fillStyle = look.band;
         ctx.fillRect(x - 3.6, y, 7.2, 1.6);
       }
     }
     // wax collar
-    ellipse(ctx, 0, 33, 11, 4, '#5a2a10');
+    ellipse(ctx, 0, 33, 11, 4, look.wood[0]);
     // gourd
     ctx.beginPath();
     ctx.moveTo(-9, 34);
@@ -1016,19 +1144,19 @@ function pungi(scene: Phaser.Scene): void {
     ctx.bezierCurveTo(22, 60, 24, 38, 9, 34);
     ctx.closePath();
     const gg = ctx.createRadialGradient(-6, 42, 2, 0, 48, 20);
-    gg.addColorStop(0, '#ffd98a');
-    gg.addColorStop(0.5, '#d18a32');
-    gg.addColorStop(1, '#6e3a10');
+    gg.addColorStop(0, look.gourd[0]);
+    gg.addColorStop(0.5, look.gourd[1]);
+    gg.addColorStop(1, look.gourd[2]);
     ctx.fillStyle = gg;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(50,20,0,0.6)';
+    ctx.strokeStyle = 'rgba(30,10,0,0.6)';
     ctx.lineWidth = 1.1;
     ctx.stroke();
     ctx.save();
     ctx.clip();
-    ctx.fillStyle = '#b8302a';
+    ctx.fillStyle = look.band;
     ctx.fillRect(-24, 45, 48, 3.2);
-    for (let x = -15; x <= 15; x += 6) ellipse(ctx, x, 52, 1.4, 1.4, '#1f8f8a');
+    for (let x = -15; x <= 15; x += 6) ellipse(ctx, x, 52, 1.4, 1.4, look.dots);
     ellipse(ctx, -7, 42, 3, 5, 'rgba(255,255,255,0.4)');
     ctx.restore();
     // mouthpiece
@@ -1045,13 +1173,154 @@ function pungi(scene: Phaser.Scene): void {
     ctx.closePath();
     ctx.fill();
     // tassel
-    ctx.strokeStyle = '#e2304a';
+    ctx.strokeStyle = look.tassel;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.moveTo(14, 44);
     ctx.quadraticCurveTo(20, 52, 18, 62);
     ctx.stroke();
-    ellipse(ctx, 18, 63, 2.4, 3.4, '#ffcc33');
+    ellipse(ctx, 18, 63, 2.4, 3.4, look.dots);
+  });
+}
+
+// ---------------------------------------------------------------- icons for the menu and the bazaar
+
+function iconTextures(scene: Phaser.Scene): void {
+  // a flower: the currency
+  tex(scene, 'flower', 26, 26, (ctx) => {
+    ctx.translate(13, 13);
+    for (let i = 0; i < 5; i++) {
+      ctx.save();
+      ctx.rotate((i / 5) * TAU);
+      ctx.beginPath();
+      ctx.ellipse(0, -6.5, 4.2, 6.2, 0, 0, TAU);
+      const g = ctx.createLinearGradient(0, -12, 0, 0);
+      g.addColorStop(0, '#ffb3d9');
+      g.addColorStop(1, '#e0357d');
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(80,10,40,0.45)';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      ctx.restore();
+    }
+    ellipse(ctx, 0, 0, 4, 4, '#ffd84a');
+    ellipse(ctx, -1.2, -1.2, 1.3, 1.3, 'rgba(255,255,255,0.7)');
+  });
+  // a crown for the king cobra
+  tex(scene, 'crown', 24, 16, (ctx) => {
+    ctx.beginPath();
+    ctx.moveTo(2, 14);
+    ctx.lineTo(1, 4);
+    ctx.lineTo(7, 9);
+    ctx.lineTo(12, 1);
+    ctx.lineTo(17, 9);
+    ctx.lineTo(23, 4);
+    ctx.lineTo(22, 14);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, 0, 0, 16);
+    g.addColorStop(0, '#fff1a8');
+    g.addColorStop(1, '#d19a12');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = '#7a4a00';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ellipse(ctx, 12, 11, 1.8, 1.8, '#e0303a');
+    ellipse(ctx, 6, 12, 1.2, 1.2, '#1f8f8a');
+    ellipse(ctx, 18, 12, 1.2, 1.2, '#1f8f8a');
+  });
+  tex(scene, 'lock', 22, 26, (ctx) => {
+    ctx.strokeStyle = '#c9c2d8';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(11, 9, 6, Math.PI, 0);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.roundRect(2, 10, 18, 14, 3);
+    ctx.fillStyle = '#c9c2d8';
+    ctx.fill();
+    ellipse(ctx, 11, 16, 2, 2, '#4a3f66');
+    ctx.fillStyle = '#4a3f66';
+    ctx.fillRect(10, 16, 2, 5);
+  });
+  tex(scene, 'check', 20, 20, (ctx) => {
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(3, 10);
+    ctx.lineTo(8, 15);
+    ctx.lineTo(17, 5);
+    ctx.stroke();
+  });
+  tex(scene, 'rain', 3, 22, (ctx) => {
+    const g = ctx.createLinearGradient(0, 0, 0, 22);
+    g.addColorStop(0, 'rgba(200,230,255,0)');
+    g.addColorStop(1, 'rgba(200,230,255,0.8)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0.5, 0, 2, 22);
+  });
+  // the daily pouch: a drawstring bag with a flower poking out
+  tex(scene, 'pouch', 72, 72, (ctx) => {
+    ctx.translate(36, 36);
+    ctx.beginPath();
+    ctx.moveTo(-14, -12);
+    ctx.bezierCurveTo(-34, -4, -34, 30, -8, 32);
+    ctx.lineTo(8, 32);
+    ctx.bezierCurveTo(34, 30, 34, -4, 14, -12);
+    ctx.closePath();
+    const g = ctx.createRadialGradient(-8, 2, 2, 0, 10, 32);
+    g.addColorStop(0, '#f2c27a');
+    g.addColorStop(0.6, '#b8702a');
+    g.addColorStop(1, '#5a2e0c');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(40,15,0,0.6)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    // gathered neck
+    ctx.beginPath();
+    ctx.moveTo(-16, -12);
+    ctx.quadraticCurveTo(0, -4, 16, -12);
+    ctx.quadraticCurveTo(0, -20, -16, -12);
+    ctx.fillStyle = '#7a4418';
+    ctx.fill();
+    ctx.strokeStyle = '#e0303a';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(-17, -11);
+    ctx.quadraticCurveTo(0, -3, 17, -11);
+    ctx.stroke();
+    for (const x of [-20, 20]) {
+      ctx.beginPath();
+      ctx.moveTo(x * 0.85, -11);
+      ctx.quadraticCurveTo(x * 1.1, -2, x * 0.9, 6);
+      ctx.stroke();
+      ellipse(ctx, x * 0.9, 7, 2.2, 3, '#ffcc33');
+    }
+    // flowers poking out
+    for (const [fx, fy, r, c1, c2] of [
+      [-8, -20, 5, '#ffb3d9', '#e0357d'],
+      [6, -24, 6, '#fff1a8', '#f29a12'],
+      [16, -18, 4.5, '#d6dcff', '#6a5cff'],
+    ] as [number, number, number, string, string][]) {
+      for (let i = 0; i < 5; i++) {
+        ctx.save();
+        ctx.translate(fx, fy);
+        ctx.rotate((i / 5) * TAU);
+        ctx.beginPath();
+        ctx.ellipse(0, -r * 0.9, r * 0.6, r, 0, 0, TAU);
+        const pg = ctx.createLinearGradient(0, -r * 2, 0, 0);
+        pg.addColorStop(0, c1);
+        pg.addColorStop(1, c2);
+        ctx.fillStyle = pg;
+        ctx.fill();
+        ctx.restore();
+      }
+      ellipse(ctx, fx, fy, r * 0.5, r * 0.5, '#ffd84a');
+    }
   });
 }
 
@@ -1165,7 +1434,7 @@ function fxTextures(scene: Phaser.Scene): void {
 
 /** Paint every texture the game uses (each only once per game). */
 export function buildArt(scene: Phaser.Scene): void {
-  background(scene);
+  for (const theme of THEMES) background(scene, theme, CONFIG.skins.themes[theme]);
   vine(scene);
   tendril(scene);
   blooms(scene);
@@ -1173,6 +1442,7 @@ export function buildArt(scene: Phaser.Scene): void {
   lidTextures(scene);
   bodyTextures(scene);
   headTextures(scene);
-  pungi(scene);
+  for (const skin of PUNGI_SKINS) pungi(scene, skin, CONFIG.skins.pungi[skin]);
+  iconTextures(scene);
   fxTextures(scene);
 }

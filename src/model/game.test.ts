@@ -4,10 +4,14 @@ import { botChoice } from './bot';
 import {
   createGame,
   gravityFor,
+  isNight,
   lidIntervalForLevel,
   maxAirForLevel,
+  meanerMs,
   potsForLevel,
+  revive,
   riseFor,
+  rollKind,
   secondsToReach,
   setHeld,
   step,
@@ -21,7 +25,7 @@ const cfg = CONFIG;
 const DT = 1000 / 60;
 
 function pot(kind: SnakeKind = 'green', h = 0, id = 100): Pot {
-  return { id, kind, h, lid: { kind: 'clay', phase: 'hung', y: 1, v: 0, timer: 999_999 } };
+  return { id, kind, h, lid: { kind: 'clay', phase: 'hung', y: 1, v: 0, timer: 999_999, bounces: 0 } };
 }
 
 /** A game past its intro with the given pots (null = empty lane) and no lid due for a long time. */
@@ -89,14 +93,33 @@ describe('charming', () => {
     expect(s.lanes[1]?.h ?? 1).toBeLessThan(s.lanes[0]?.h ?? 0);
   });
 
-  it('a snake that reaches the vine clears its pot and scores', () => {
+  it('a snake that reaches the vine clears its pot, scores and leaves flowers', () => {
     const s = game([pot('gold', 0.98), pot(), null, null, null]);
     setHeld(s, 0);
     run(s, 200);
     expect(s.lanes[0]).toBeNull();
     expect(s.charmed).toBe(1);
+    expect(s.charmedByKind).toEqual({ gold: 1 });
     expect(s.score).toBe(cfg.snakes.gold.points);
-    expect(s.events).toContainEqual(expect.objectContaining({ type: 'charm', lane: 0, combo: 1 }));
+    expect(s.flowers).toBe(cfg.flowers.gold);
+    expect(s.events).toContainEqual(
+      expect.objectContaining({ type: 'charm', lane: 0, combo: 1, flowers: cfg.flowers.gold }),
+    );
+  });
+
+  it('a charm at a high combo leaves an extra flower', () => {
+    const lanes = [pot('green', 0.999), pot('green', 0.999), pot('green', 0.999), pot(), pot()];
+    const s = game(lanes);
+    for (let i = 0; i < 3; i++) {
+      setHeld(s, i);
+      step(s, DT, cfg);
+    }
+    const charms = s.events.filter((e) => e.type === 'charm');
+    expect(charms.map((e) => (e.type === 'charm' ? e.flowers : -1))).toEqual([
+      cfg.flowers.green,
+      cfg.flowers.green,
+      cfg.flowers.green + cfg.flowers.comboBonus,
+    ]);
   });
 
   it('shakes the lids of the neighbouring pots loose', () => {
@@ -144,6 +167,25 @@ describe('lids', () => {
     run(s, 1000);
     expect(s.lanes[0]?.lid.phase).toBe('hung');
     expect(s.landed).toBe(0);
+  });
+
+  it('come back meaner after every bounce: shorter rest, shorter wobble, down to a floor', () => {
+    const s = game([pot('green', 0.6), null, null, null, null]);
+    drop(s, 0);
+    while (s.saves === 0) step(s, DT, cfg);
+    run(s, 1000);
+    const lid = s.lanes[0]!.lid;
+    expect(lid.bounces).toBe(1);
+    expect(lid.phase).toBe('hung');
+    expect(lid.timer).toBeGreaterThan(0);
+    expect(lid.timer).toBeLessThan(cfg.lids.restMs * cfg.lids.meaner); // rest started shorter, then counted down
+    lid.timer = 0;
+    s.lidTimer = 1;
+    step(s, DT, cfg);
+    expect(s.events.find((e) => e.type === 'wobble')).toMatchObject({
+      ms: warnMsForLevel(1, cfg) * cfg.lids.meaner,
+    });
+    expect(meanerMs(1000, 99, cfg)).toBe(cfg.lids.meanerMinMs);
   });
 
   it('land on a snake below guard height: the pot is sealed and a new pot appears next door', () => {
@@ -213,10 +255,40 @@ describe('levels', () => {
       level: 1,
       bonus: cfg.scoring.levelBonus + cfg.scoring.perfectBonus,
       perfect: true,
+      flowers: cfg.flowers.perfect,
     });
     run(s, cfg.levels.breakMs + 50);
     expect(s.level).toBe(2);
     expect(s.lanes.filter((p) => p !== null)).toHaveLength(potsForLevel(2, cfg));
+  });
+
+  it('deal the rarer breeds from their levels on, moon snakes only at night', () => {
+    const day = createGame(1, cfg);
+    const night = createGame(1, cfg, 1, true);
+    expect(isNight(22, cfg)).toBe(true);
+    expect(isNight(3, cfg)).toBe(true);
+    expect(isNight(12, cfg)).toBe(false);
+    const kinds = (s: GameState, level: number) => {
+      s.level = level;
+      return new Set(Array.from({ length: 200 }, (_, i) => rollKind(s, i / 200, cfg)));
+    };
+    expect(kinds(day, 1)).toEqual(new Set(['green']));
+    expect(kinds(day, 2)).toEqual(new Set(['green', 'gold']));
+    expect(kinds(night, 2)).toEqual(new Set(['green', 'gold', 'moon']));
+    expect(kinds(day, 5)).toEqual(new Set(['green', 'gold', 'sleepy', 'ruby']));
+    expect(kinds(night, 9)).toEqual(new Set(['green', 'gold', 'sleepy', 'ruby', 'moon', 'king']));
+  });
+
+  it('a perfect level leaves flowers; a level with a landed lid does not', () => {
+    const s = game([pot('green', 0.999), null, null, null, null]);
+    setHeld(s, 0);
+    step(s, DT, cfg);
+    expect(s.events.find((e) => e.type === 'clear')).toMatchObject({ perfect: true, flowers: cfg.flowers.perfect });
+    const t = game([pot('green', 0.999), null, null, null, null]);
+    t.landedThisLevel = 1;
+    setHeld(t, 0);
+    step(t, DT, cfg);
+    expect(t.events.find((e) => e.type === 'clear')).toMatchObject({ perfect: false, flowers: 0 });
   });
 
   it('get harder and level off', () => {
@@ -228,6 +300,36 @@ describe('levels', () => {
     expect(potsForLevel(99, cfg)).toBe(cfg.levels.maxPots);
     expect(potsForLevel(99, cfg)).toBeLessThan(cfg.board.lanes); // always room for one mistake
     expect(riseFor(99, 'green', cfg)).toBeCloseTo(cfg.snakes.green.rise * cfg.snakes.riseMinMult);
+  });
+});
+
+describe('continue', () => {
+  it('blows away the landed pot and the most threatened one, puts the lids back and plays on, once', () => {
+    const s = game([pot(), pot(), pot(), pot(), pot()]);
+    s.lanes[1]!.lid.phase = 'fall';
+    s.lanes[1]!.lid.y = 0.3;
+    drop(s, 4);
+    run(s, 1500);
+    expect(s.over).toBe(true);
+    expect(revive(s, 4, cfg)).toEqual([4, 1]);
+    expect(s.over).toBe(false);
+    expect(s.revived).toBe(true);
+    expect(s.lanes[4]).toBeNull();
+    expect(s.lanes[1]).toBeNull();
+    expect(s.lanes.filter((p) => p !== null)).toHaveLength(3);
+    for (const p of s.lanes) if (p) expect(p.lid).toMatchObject({ phase: 'hung', y: 1 });
+    expect(s.events).toContainEqual({ type: 'revive', lanes: [4, 1] });
+    expect(s.introTimer).toBe(cfg.levels.introMs);
+    run(s, 300);
+    expect(s.over).toBe(false);
+    // a second continue in the same run is refused
+    s.over = true;
+    expect(revive(s, 0, cfg)).toBeNull();
+  });
+
+  it('does nothing before a game over', () => {
+    const s = game([pot(), null, null, null, null]);
+    expect(revive(s, 0, cfg)).toBeNull();
   });
 });
 

@@ -4,7 +4,7 @@
  * bot.reactMs, like a person would.
  */
 import type { GameConfig } from '../config';
-import { riseFor, secondsToReach, warnMsForLevel, type GameState, type RulesConfig } from './game';
+import { meanerMs, riseFor, secondsToReach, warnMsForLevel, type GameState, type RulesConfig } from './game';
 
 type BotConfig = RulesConfig & Pick<GameConfig, 'bot'>;
 
@@ -16,7 +16,8 @@ export function botChoice(state: GameState, cfg: BotConfig): number | null {
   state.lanes.forEach((pot, lane) => {
     if (!pot) return;
     const lid = pot.lid;
-    if (lid.phase === 'wobble' && warnMsForLevel(state.level, cfg) - lid.timer < cfg.bot.reactMs) return;
+    const warn = meanerMs(warnMsForLevel(state.level, cfg), lid.bounces, cfg);
+    if (lid.phase === 'wobble' && warn - lid.timer < cfg.bot.reactMs) return;
     const t = secondsToReach(state, lane, guard, cfg);
     if (t === null) return;
     if (pot.h - cfg.snakes[pot.kind].sink * t >= guard) return; // already high enough to take the hit

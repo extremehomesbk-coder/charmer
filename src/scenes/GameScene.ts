@@ -4,9 +4,30 @@ import { Sound } from '../audio';
 import { CONFIG } from '../config';
 import { bindHold } from '../input';
 import { botChoice } from '../model/bot';
-import { createGame, setHeld, step, type GameEvent, type GameState, type Pot, type SnakeKind } from '../model/game';
-import { loadSave, recordBest, writeSave } from '../storage';
-import { designCamera, gradientFill, label } from '../ui';
+import {
+  bankFlowers,
+  canContinue,
+  payContinue,
+  recordCharm,
+  SNAKE_NAMES,
+  tamedKinds,
+  tameThreshold,
+  type Theme,
+} from '../meta';
+import {
+  createGame,
+  isNight,
+  revive,
+  setHeld,
+  step,
+  type GameEvent,
+  type GameState,
+  type Pot,
+  type SnakeKind,
+} from '../model/game';
+import { buildShareCard, shareCard } from '../share';
+import { loadSave, recordBest, updateSave, writeSave, type SaveData } from '../storage';
+import { button, designCamera, flowerPill, gradientFill, label, panel, snakeFace, type Button } from '../ui';
 
 const L = CONFIG.layout;
 const F = CONFIG.feel;
@@ -25,6 +46,48 @@ const lidTopAt = (y: number) => L.rimY - y * CLIMB - L.lidHeight;
 export const POT_TOP = L.rimY - 9; // the pot textures put the rim's centre line 9 px below their top
 const TAIL_Y = L.rimY + 40; // where a snake's body starts, hidden inside its pot
 const ROPE_POINTS = 36;
+
+/** Ambient particles for a theme: fireflies at dusk, rain in the monsoon, dust motes at noon. */
+export function weather(scene: Phaser.Scene, theme: Theme, depth: number): void {
+  const kind = CONFIG.skins.themes[theme]?.weather ?? 'fireflies';
+  if (kind === 'rain') {
+    scene.add
+      .particles(0, 0, 'rain', {
+        x: { min: -40, max: L.width + 40 },
+        y: -20,
+        lifespan: 1100,
+        speedY: { min: 520, max: 680 },
+        speedX: { min: -70, max: -40 },
+        scale: { start: 0.6 / R, end: 0.6 / R },
+        alpha: { start: 0.55, end: 0.2 },
+        rotate: 6,
+        frequency: 22,
+      })
+      .setDepth(depth);
+    return;
+  }
+  scene.add
+    .particles(0, 0, 'spark', {
+      x: { min: 0, max: L.width },
+      y: { min: kind === 'dust' ? 150 : 300, max: L.rimY },
+      lifespan: 6000,
+      speedY: { min: -10, max: -3 },
+      speedX: { min: -8, max: 8 },
+      scale: { start: kind === 'dust' ? 0.18 : 0.25, end: 0.05 },
+      alpha: { start: kind === 'dust' ? 0.5 : 0.9, end: 0 },
+      tint: kind === 'dust' ? [0xfff3d0, 0xffe0a0] : [0xfff3a0, 0xffd27a, 0xb8ff9a],
+      frequency: kind === 'dust' ? 300 : 450,
+      blendMode: Phaser.BlendModes.ADD,
+    })
+    .setDepth(depth);
+}
+
+function nightNow(params: URLSearchParams): boolean {
+  const flag = params.get('night');
+  if (flag === '1') return true;
+  if (flag === '0') return false;
+  return isNight(new Date().getHours(), CONFIG);
+}
 
 const DEPTH = {
   bg: 0,
@@ -67,6 +130,7 @@ interface LaneView {
   pupils: Phaser.GameObjects.Image[];
   eyelids: Phaser.GameObjects.Image[];
   tongue: Phaser.GameObjects.Image;
+  crown: Phaser.GameObjects.Image;
   lid: Phaser.GameObjects.Image;
   tendril: Phaser.GameObjects.Image;
   lidShadow: Phaser.GameObjects.Image;
@@ -120,6 +184,12 @@ export class GameScene extends Phaser.Scene {
   private vine!: Phaser.GameObjects.Image;
   private shownScore = 0;
   private time0 = 0;
+  private save!: SaveData;
+  private theme: Theme = 'dusk';
+  private flowersPill!: ReturnType<typeof flowerPill>;
+  private offer: { parts: Phaser.GameObjects.GameObject[]; buttons: Button[]; timer: Phaser.Time.TimerEvent } | null =
+    null;
+  private banked = false;
 
   constructor() {
     super('game');
@@ -129,39 +199,31 @@ export class GameScene extends Phaser.Scene {
     const params = new URLSearchParams(window.location.search);
     this.auto = data.auto === true || params.get('auto') === '1';
     const seed = Number(params.get('seed')) || Math.floor(Math.random() * 1e9);
-    this.state = createGame(seed, CONFIG, Number(params.get('level')) || 1);
+    const night = nightNow(params);
+    this.state = createGame(seed, CONFIG, Number(params.get('level')) || 1, night);
     this.lanes = [];
     this.overShown = false;
+    this.offer = null;
+    this.banked = false;
     this.botTimer = 0;
     this.shownScore = 0;
     this.pungiX = L.width / 2;
 
     buildArt(this);
     designCamera(this);
-    this.sfx.setMuted(loadSave().settings.muted === true);
+    this.save = loadSave();
+    this.theme = (this.save.theme in CONFIG.skins.themes ? this.save.theme : 'dusk') as Theme;
+    this.sfx.setMuted(this.save.settings.muted === true);
+    this.sfx.setSkin(this.save.pungi as never);
     const img = (x: number, y: number, key: string, depth: number) =>
       this.add
         .image(x, y, key)
         .setScale(1 / R)
         .setDepth(depth);
 
-    img(0, 0, 'bg', DEPTH.bg).setOrigin(0);
-    // fireflies drifting over the terrace
-    this.add
-      .particles(0, 0, 'spark', {
-        x: { min: 0, max: L.width },
-        y: { min: 300, max: L.rimY },
-        lifespan: 6000,
-        speedY: { min: -10, max: -3 },
-        speedX: { min: -8, max: 8 },
-        scale: { start: 0.25, end: 0.05 },
-        alpha: { start: 0.9, end: 0 },
-        tint: [0xfff3a0, 0xffd27a, 0xb8ff9a],
-        frequency: 450,
-        blendMode: Phaser.BlendModes.ADD,
-      })
-      .setDepth(DEPTH.ambient);
-    for (let i = 0; i < 9; i++) {
+    img(0, 0, `bg_${this.theme}`, DEPTH.bg).setOrigin(0);
+    weather(this, this.theme, DEPTH.ambient);
+    for (let i = 0; i < (CONFIG.skins.themes[this.theme].stars ? 9 : 0); i++) {
       const s = img(Phaser.Math.Between(10, L.width - 10), Phaser.Math.Between(70, 420), 'star', DEPTH.ambient)
         .setScale(Phaser.Math.FloatBetween(0.25, 0.5) / R)
         .setAlpha(0)
@@ -185,7 +247,8 @@ export class GameScene extends Phaser.Scene {
     for (let i = 0; i < LANES; i++) this.lanes.push(this.makeLane(i));
     this.vine = img(0, L.vineY - 35, 'vine', DEPTH.vine).setOrigin(0);
 
-    this.pungi = img(this.pungiX, L.fluteY - 22, 'pungi', DEPTH.pungi).setOrigin(0.5, 0);
+    const skin = this.save.pungi in CONFIG.skins.pungi ? this.save.pungi : 'classic';
+    this.pungi = img(this.pungiX, L.fluteY - 22, `pungi_${skin}`, DEPTH.pungi).setOrigin(0.5, 0);
 
     const fx = (key: string, cfg: Phaser.Types.GameObjects.Particles.ParticleEmitterConfig) =>
       this.add.particles(0, 0, key, { emitting: false, ...cfg }).setDepth(DEPTH.fx);
@@ -265,7 +328,15 @@ export class GameScene extends Phaser.Scene {
     this.hintText = label(this, L.width / 2, 594, '', 14, { color: '#ffe3c2', stroke: 4 })
       .setOrigin(0.5)
       .setDepth(DEPTH.hud);
-    this.setHint(this.auto ? 'DEMO · tap to play' : 'hold under a pot to charm its snake up to the vine');
+    this.flowersPill = flowerPill(this, 50, L.safeTop + 50, DEPTH.hud, '+');
+    this.flowersPill.set(0);
+    this.setHint(
+      this.auto
+        ? 'DEMO · tap to play'
+        : night
+          ? 'moon snakes are out tonight · hold under a pot to charm'
+          : 'hold under a pot to charm its snake up to the vine',
+    );
 
     bindHold(
       this,
@@ -278,9 +349,19 @@ export class GameScene extends Phaser.Scene {
       LANES,
     );
     if (this.auto) this.input.once('pointerdown', () => this.leaveDemo());
-    this.events.once('shutdown', () => this.sfx.charm(null));
+    this.events.once('shutdown', () => {
+      this.sfx.charm(null);
+      this.bank(); // leaving mid-run still keeps the flowers
+    });
     this.cameras.main.fadeIn(250, 18, 8, 40);
     this.time0 = this.time.now;
+  }
+
+  /** Put this run's flowers in the wallet, once. The demo earns nothing. */
+  private bank(): void {
+    if (this.banked || this.auto) return;
+    this.banked = true;
+    if (this.state.flowers > 0) this.save = updateSave((s) => bankFlowers(s, this.state.flowers));
   }
 
   private makeLane(i: number): LaneView {
@@ -307,8 +388,9 @@ export class GameScene extends Phaser.Scene {
     const eyes = [-1, 1].map((s) => part('eye', s * EYE_X, EYE_Y));
     const pupils = [-1, 1].map((s) => part('pupil', s * EYE_X, EYE_Y + 0.5));
     const eyelids = [-1, 1].map((s) => part('eyelid_sleepy', s * EYE_X, EYE_Y - 4.5));
+    const crown = part('crown', 0, -1).setOrigin(0.5, 1).setVisible(false);
     const headBox = this.add
-      .container(x, L.rimY, [hood, tongue, head, ...eyes, ...pupils, ...eyelids])
+      .container(x, L.rimY, [hood, tongue, head, ...eyes, ...pupils, ...eyelids, crown])
       .setDepth(DEPTH.head)
       .setVisible(false);
     const lid = img('lid_clay', DEPTH.lid).setOrigin(0.5, 0);
@@ -332,6 +414,7 @@ export class GameScene extends Phaser.Scene {
       pupils,
       eyelids,
       tongue,
+      crown,
       lid,
       tendril,
       lidShadow,
@@ -453,14 +536,100 @@ export class GameScene extends Phaser.Scene {
       }
       case 'charm':
         this.charmed(e.lane, e.pot, e.points, e.combo);
+        this.flowersEarned(e.flowers, laneX(e.lane), HUNG_BOTTOM + 10);
+        this.tame(e.pot.kind);
         break;
       case 'clear':
         this.levelClear(e.level, e.bonus, e.perfect);
+        if (e.flowers) this.time.delayedCall(700, () => this.flowersEarned(e.flowers, L.width / 2, 480));
         break;
       case 'over':
         this.gameOver(e.lane);
         break;
+      case 'revive':
+        for (const lane of e.lanes) this.blowAway(lane);
+        this.banner('ONE MORE TUNE!', 'the lids are back on the vine');
+        this.cameras.main.flash(200, 255, 220, 160);
+        this.sfx.fanfare();
+        break;
     }
+  }
+
+  /** Flowers fly from where they were earned to the counter. */
+  private flowersEarned(n: number, x: number, y: number): void {
+    if (n <= 0 || this.auto) return;
+    const target = this.flowersPill.iconAt();
+    const total = this.state.flowers;
+    for (let i = 0; i < n; i++) {
+      const f = this.add
+        .image(x + Phaser.Math.Between(-12, 12), y, 'flower')
+        .setScale(1 / R)
+        .setDepth(DEPTH.text);
+      this.tweens.add({
+        targets: f,
+        x: target.x,
+        y: target.y,
+        scale: 0.55 / R,
+        angle: 180,
+        delay: 250 + i * 90,
+        duration: 600,
+        ease: 'Cubic.easeIn',
+        onComplete: () => {
+          f.destroy();
+          this.flowersPill.set(total, true);
+        },
+      });
+    }
+  }
+
+  /** Count the charm toward taming its breed; announce a breed tamed just now. */
+  private tame(kind: SnakeKind): void {
+    if (this.auto) return;
+    const r = recordCharm(this.save, kind);
+    this.save = r.save;
+    writeSave(this.save);
+    if (!r.tamedNow) return;
+    this.time.delayedCall(600, () => {
+      this.banner('NEW SNAKE!', `${SNAKE_NAMES[kind]} tamed · it joins your title screen`);
+      this.sfx.tamed();
+      const face = snakeFace(this, L.width / 2, 300, kind, 1.4)
+        .setDepth(DEPTH.text)
+        .setAlpha(0);
+      this.tweens.add({ targets: face, alpha: 1, y: 290, duration: 300, ease: 'Back.easeOut' });
+      this.tweens.add({
+        targets: face,
+        alpha: 0,
+        y: 260,
+        delay: 1400,
+        duration: 400,
+        onComplete: () => face.destroy(),
+      });
+    });
+  }
+
+  /** A continue blew this pot away: the snake dives back in and the pot pops, no flower, no points. */
+  private blowAway(lane: number): void {
+    const v = this.lanes[lane];
+    v.pot = null;
+    v.exit = null;
+    v.wobble = 0;
+    v.alert.setVisible(false);
+    v.lidShadow.setVisible(false);
+    this.sparks.explode(14, v.x, L.rimY - 20);
+    this.dust.explode(10, v.x, L.rimY + 30);
+    this.shards.explode(8, v.x, L.rimY + 20);
+    this.tweens.add({ targets: v.lid, scale: 1.6 / R, alpha: 0, duration: 260, ease: 'Quad.easeOut' });
+    this.tweens.add({
+      targets: [v.front, v.back],
+      scaleX: 1.25 / R,
+      scaleY: 0.2 / R,
+      alpha: 0,
+      duration: 280,
+      ease: 'Back.easeIn',
+      delay: 120,
+    });
+    this.tweens.add({ targets: v.shadow, alpha: 0, duration: 300, delay: 120 });
+    this.sfx.pop(0.7);
   }
 
   private spawn(lane: number, pot: Pot, from: number | null): void {
@@ -481,6 +650,7 @@ export class GameScene extends Phaser.Scene {
     v.hood.setTexture(`hood_${pot.kind}`);
     v.head.setTexture(`head_${pot.kind}`);
     v.eyelids.forEach((e) => e.setTexture(`eyelid_${pot.kind}`).setVisible(pot.kind === 'sleepy'));
+    v.crown.setVisible(pot.kind === 'king');
     v.lid.setTexture(`lid_${pot.lid.kind}`);
     for (const o of [v.shadow, v.back, v.front, v.rope, v.headBox, v.lid, v.tendril]) o.setVisible(true).setAlpha(1);
     v.front.setScale(1 / R);
@@ -561,7 +731,112 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.shake(300, 0.012);
     this.sfx.charm(null);
     this.time.delayedCall(450, () => this.sfx.sad());
-    this.time.delayedCall(1100, () => this.showGameOver());
+    if (!this.auto && canContinue(this.save, this.state.flowers, this.state.revived)) {
+      this.time.delayedCall(900, () => this.offerContinue(lane));
+    } else this.time.delayedCall(1100, () => this.showGameOver());
+  }
+
+  /** One more tune? Spend flowers to blow two pots away and play on. Stays up for meta.continueOfferMs. */
+  private offerContinue(lane: number): void {
+    if (this.offer || this.overShown) return;
+    this.save = updateSave((s) => ({ ...s, stats: { ...s.stats, offers: s.stats.offers + 1 } }));
+    const cx = L.width / 2;
+    const cy = 400;
+    const price = CONFIG.meta.continuePrice;
+    const have = this.save.flowers + this.state.flowers;
+    const dim = this.add
+      .rectangle(cx, L.height / 2, L.width, L.height, 0x0c0420, 0.5)
+      .setDepth(DEPTH.overlay)
+      .setAlpha(0);
+    this.tweens.add({ targets: dim, alpha: 1, duration: 250 });
+    const card = panel(this, cx, cy, 310, 330, DEPTH.overlay + 1);
+    const title = label(this, cx, cy - 118, 'ONE MORE TUNE?', 30, { stroke: 6, shadow: true })
+      .setOrigin(0.5)
+      .setDepth(DEPTH.overlay + 2);
+    gradientFill(title, '#fff6c9', '#ff9a2e');
+    const pungi = this.add
+      .image(cx - 70, cy - 20, this.pungi.texture.key)
+      .setScale(1.1 / R)
+      .setDepth(DEPTH.overlay + 2)
+      .setAngle(-12);
+    const what = label(
+      this,
+      cx + 20,
+      cy - 46,
+      `blow away ${CONFIG.meta.continueClears} pots\nlids back on the vine\nsame level, same score`,
+      15,
+      { color: '#fff1d6', stroke: 4, align: 'left' },
+    )
+      .setOrigin(0, 0.5)
+      .setLineSpacing(4)
+      .setDepth(DEPTH.overlay + 2);
+    const wallet = label(this, cx + 20, cy + 14, `you have ${have}`, 13, { color: '#e7c9ff', stroke: 3 })
+      .setOrigin(0, 0.5)
+      .setDepth(DEPTH.overlay + 2);
+    const walletIcon = this.add
+      .image(cx + 20 + wallet.width + 12, cy + 14, 'flower')
+      .setScale(0.8 / R)
+      .setDepth(DEPTH.overlay + 2);
+    // the clock
+    const bar = this.add.graphics().setDepth(DEPTH.overlay + 2);
+    const parts: Phaser.GameObjects.GameObject[] = [dim, card, title, pungi, what, wallet, walletIcon, bar];
+    const total = CONFIG.meta.continueOfferMs;
+    let left = total;
+    let lastTick = Math.ceil(total / 1000);
+    const timer = this.time.addEvent({
+      delay: 50,
+      loop: true,
+      callback: () => {
+        left -= 50;
+        const f = Math.max(0, left / total);
+        bar.clear();
+        bar.fillStyle(0x0c0420, 0.7).fillRoundedRect(cx - 120, cy + 40, 240, 10, 5);
+        bar
+          .fillStyle(f > 0.3 ? 0xffd36b : 0xff6b6b, 1)
+          .fillRoundedRect(cx - 120, cy + 40, Math.max(10, 240 * f), 10, 5);
+        const sec = Math.ceil(left / 1000);
+        if (sec < lastTick) {
+          lastTick = sec;
+          this.sfx.tick2();
+        }
+        if (left <= 0) decline();
+      },
+    });
+    const close = () => {
+      if (!this.offer) return;
+      this.offer.timer.remove();
+      this.offer.buttons.forEach((b) => b.destroy());
+      this.offer.parts.forEach((p) => p.destroy());
+      this.offer = null;
+    };
+    const decline = () => {
+      close();
+      this.showGameOver();
+    };
+    const accept = () => {
+      const paid = payContinue(this.save, this.state.flowers);
+      this.save = paid.save;
+      this.state.flowers = paid.runFlowers;
+      this.save = updateSave(() => ({
+        ...this.save,
+        stats: { ...this.save.stats, continues: this.save.stats.continues + 1 },
+      }));
+      this.flowersPill.set(this.state.flowers, true);
+      close();
+      this.sfx.coins(4);
+      revive(this.state, lane, CONFIG); // its 'revive' event plays the effects next frame
+    };
+    const yes = button(this, cx, cy + 88, 220, 52, `CONTINUE  ·  ${price}`, accept, {
+      size: 19,
+      depth: DEPTH.overlay + 2,
+      icon: 'flower',
+    });
+    const no = button(this, cx, cy + 142, 160, 40, 'no thanks', decline, {
+      size: 14,
+      fill: 0x5a3a8a,
+      depth: DEPTH.overlay + 2,
+    });
+    this.offer = { parts, buttons: [yes, no], timer };
   }
 
   // ------------------------------------------------------------ per-frame drawing
@@ -656,7 +931,8 @@ export class GameScene extends Phaser.Scene {
     const out = (L.rimY - top) / 60; // 0 at the rim, 1 a head-height out
     v.hoodOpen += (v.charmAmt * Phaser.Math.Clamp(out - 0.6, 0, 1) - v.hoodOpen) * Math.min(1, F.hoodLerp * k);
     if (v.exit) v.hoodOpen = 1;
-    v.hood.setScale((0.4 + 0.6 * v.hoodOpen) / R, (0.78 + 0.22 * v.hoodOpen) / R);
+    const big = v.kind === 'king' ? 1.15 : 1;
+    v.hood.setScale(((0.4 + 0.6 * v.hoodOpen) * big) / R, ((0.78 + 0.22 * v.hoodOpen) * big) / R);
     this.drawFace(v, dt, lid?.phase === 'wobble' || lid?.phase === 'fall', pot?.lid.phase === 'sealed');
 
     // lid
@@ -845,53 +1121,146 @@ export class GameScene extends Phaser.Scene {
     if (this.overShown) return;
     this.overShown = true;
     const s = this.state;
-    const best = this.auto ? loadSave().best : recordBest(s.score);
+    const earned = s.flowers;
+    const prevBest = this.save.best;
+    const best = this.auto ? prevBest : recordBest(s.score);
+    this.bank();
+    if (!this.auto) this.save = updateSave((sv) => ({ ...sv, stats: { ...sv.stats, runs: sv.stats.runs + 1 } }));
     const cx = L.width / 2;
-    const cy = 400;
+    const cy = 410;
+    const h = 430;
     const dim = this.add
       .rectangle(cx, L.height / 2, L.width, L.height, 0x0c0420, 0.55)
       .setDepth(DEPTH.overlay)
       .setAlpha(0);
     this.tweens.add({ targets: dim, alpha: 1, duration: 300 });
-    const panel = this.add.graphics().setDepth(DEPTH.overlay + 1);
-    panel.fillStyle(0x2a1458, 0.97).fillRoundedRect(cx - 150, cy - 150, 300, 300, 26);
-    panel.lineStyle(4, 0xffc23d, 1).strokeRoundedRect(cx - 150, cy - 150, 300, 300, 26);
-    panel.lineStyle(1.5, 0xfff1c2, 0.5).strokeRoundedRect(cx - 142, cy - 142, 284, 284, 20);
-    const title = label(this, cx, cy - 104, 'NO ROOM ON\nTHE RUG!', 30, { stroke: 6, shadow: true })
+    panel(this, cx, cy, 320, h, DEPTH.overlay + 1);
+    const top = cy - h / 2;
+    const title = label(this, cx, top + 44, 'NO ROOM ON THE RUG!', 24, { stroke: 6, shadow: true })
       .setOrigin(0.5)
-      .setLineSpacing(-4)
       .setDepth(DEPTH.overlay + 2);
     gradientFill(title, '#fff6c9', '#ff9a2e');
-    const score = label(this, cx, cy - 22, String(s.score), 48, { stroke: 7, shadow: true })
+    const score = label(this, cx, top + 96, String(s.score), 50, { stroke: 7, shadow: true })
       .setOrigin(0.5)
       .setDepth(DEPTH.overlay + 2);
     gradientFill(score, '#fff7d6', '#ffc23d');
-    const lines = [
-      `LEVEL ${s.level}  ·  ${s.charmed} snakes charmed`,
-      `${s.saves} lids saved  ·  BEST ${best}`,
-      s.score >= best && s.score > 0 && !this.auto ? 'NEW BEST!' : '',
-    ];
-    lines.forEach((text, i) =>
-      label(this, cx, cy + 30 + i * 24, text, i === 2 ? 18 : 14, { color: i === 2 ? '#ffe27a' : '#efe6ff', stroke: 4 })
+    const newBest = s.score >= best && s.score > 0 && !this.auto && s.score > prevBest;
+    label(
+      this,
+      cx,
+      top + 136,
+      `LEVEL ${s.level}  ·  ${s.charmed} charmed  ·  ${s.saves} saved${newBest ? '' : `  ·  BEST ${best}`}`,
+      13,
+      { color: '#efe6ff', stroke: 4 },
+    )
+      .setOrigin(0.5)
+      .setDepth(DEPTH.overlay + 2);
+    if (newBest) {
+      const nb = label(this, cx + 120, top + 70, 'NEW BEST!', 16, { stroke: 5 })
         .setOrigin(0.5)
-        .setDepth(DEPTH.overlay + 2),
-    );
-    const tap = label(this, cx, cy + 122, this.auto ? 'demo · restarting' : 'TAP TO PLAY AGAIN', 18, {
-      color: '#ffffff',
-      stroke: 5,
+        .setAngle(12)
+        .setDepth(DEPTH.overlay + 3);
+      gradientFill(nb, '#ffffff', '#7dfcb0');
+      this.tweens.add({ targets: nb, scale: { from: 1, to: 1.15 }, yoyo: true, repeat: -1, duration: 420 });
+    }
+    // flowers banked
+    const fl = label(this, cx + 12, top + 170, this.auto ? 'demo: no flowers' : `+${earned} flowers banked`, 17, {
+      color: '#ffe3c2',
+      stroke: 4,
     })
       .setOrigin(0.5)
       .setDepth(DEPTH.overlay + 2);
-    this.tweens.add({ targets: tap, alpha: { from: 1, to: 0.45 }, yoyo: true, repeat: -1, duration: 600 });
+    this.add
+      .image(cx - fl.width / 2 - 2, top + 170, 'flower')
+      .setScale(1 / R)
+      .setDepth(DEPTH.overlay + 2);
+    // taming progress for the breeds charmed this run (up to three)
+    const kinds = (Object.keys(s.charmedByKind) as SnakeKind[])
+      .sort((a, b) => (s.charmedByKind[b] ?? 0) - (s.charmedByKind[a] ?? 0))
+      .slice(0, 3);
+    kinds.forEach((kind, i) => {
+      const y = top + 206 + i * 40;
+      const x0 = cx - 128;
+      snakeFace(this, x0 + 16, y + 8, kind, 0.55).setDepth(DEPTH.overlay + 2);
+      const count = this.save.tamed[kind] ?? 0;
+      const need = tameThreshold(kind);
+      const tamed = count >= need;
+      label(this, x0 + 44, y - 8, SNAKE_NAMES[kind], 13, { color: '#fff1d6', stroke: 3 })
+        .setOrigin(0, 0.5)
+        .setDepth(DEPTH.overlay + 2);
+      const g = this.add.graphics().setDepth(DEPTH.overlay + 2);
+      const bw = 150;
+      g.fillStyle(0x0c0420, 0.7).fillRoundedRect(x0 + 44, y + 2, bw, 9, 4.5);
+      g.fillStyle(tamed ? 0x7dfcb0 : 0xffd27a, 1).fillRoundedRect(
+        x0 + 44,
+        y + 2,
+        Math.max(9, bw * Math.min(1, count / need)),
+        9,
+        4.5,
+      );
+      label(this, x0 + 44 + bw + 8, y + 6, tamed ? 'TAMED' : `${Math.min(count, need)}/${need}`, 11, {
+        color: tamed ? '#7dfcb0' : '#e7c9ff',
+        stroke: 3,
+      })
+        .setOrigin(0, 0.5)
+        .setDepth(DEPTH.overlay + 2);
+    });
+    if (!kinds.length) {
+      label(this, cx, top + 216, 'charm a snake to start taming its breed', 12, { color: '#e7c9ff', stroke: 3 })
+        .setOrigin(0.5)
+        .setDepth(DEPTH.overlay + 2);
+    }
+
+    const restart = () => {
+      this.input.removeAllListeners();
+      this.cameras.main.fadeOut(200, 18, 8, 40);
+      this.cameras.main.once('camerafadeoutcomplete', () => this.scene.restart({ auto: this.auto }));
+    };
+    const menu = () => {
+      this.input.removeAllListeners();
+      this.cameras.main.fadeOut(200, 18, 8, 40);
+      this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('menu'));
+    };
+    if (this.auto) {
+      label(this, cx, top + h - 60, 'demo · restarting', 16, { color: '#ffffff', stroke: 5 })
+        .setOrigin(0.5)
+        .setDepth(DEPTH.overlay + 2);
+      this.time.delayedCall(F.restartGuardMs * 4, restart);
+      this.input.once('pointerdown', menu);
+      return;
+    }
     // A short guard so the finger that was holding a pot does not restart the game instantly.
     this.time.delayedCall(F.restartGuardMs, () => {
-      const restart = () => {
-        this.cameras.main.fadeOut(200, 18, 8, 40);
-        this.cameras.main.once('camerafadeoutcomplete', () => this.scene.restart({ auto: this.auto }));
-      };
-      this.input.once('pointerdown', restart);
+      button(this, cx, top + h - 92, 230, 50, 'PLAY AGAIN', restart, { size: 21, depth: DEPTH.overlay + 2 });
+      button(this, cx - 66, top + h - 40, 112, 40, 'SHARE', () => this.shareRun(best), {
+        size: 14,
+        fill: 0x2e8b57,
+        depth: DEPTH.overlay + 2,
+      });
+      button(this, cx + 66, top + h - 40, 112, 40, 'MENU', menu, {
+        size: 14,
+        fill: 0x5a3a8a,
+        depth: DEPTH.overlay + 2,
+      });
       this.input.keyboard?.once('keydown-SPACE', restart);
-      if (this.auto) this.time.delayedCall(F.restartGuardMs * 3, restart);
     });
+  }
+
+  private shareRun(best: number): void {
+    const s = this.state;
+    const card = buildShareCard(this, {
+      score: s.score,
+      level: s.level,
+      charmed: s.charmed,
+      best,
+      tamed: tamedKinds(this.save),
+      theme: this.theme,
+    });
+    void shareCard(card, `I scored ${s.score} in Snake Song (level ${s.level}). Can you charm more snakes?`).then(
+      (r) => {
+        const msg = r === 'shared' ? 'shared!' : r === 'saved' ? 'picture saved' : 'could not share';
+        this.floatText(L.width / 2, 700, msg, '#bff6ff', 16);
+      },
+    );
   }
 }

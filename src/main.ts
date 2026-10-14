@@ -1,9 +1,10 @@
 import Phaser from 'phaser';
 import { CONFIG } from './config';
+import { BazaarScene } from './scenes/BazaarScene';
 import { GameScene } from './scenes/GameScene';
 import { MenuScene } from './scenes/MenuScene';
 
-new Phaser.Game({
+const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'app',
   backgroundColor: CONFIG.colors.background,
@@ -16,5 +17,8 @@ new Phaser.Game({
   },
   render: { antialias: true },
   input: { activePointers: 2 },
-  scene: [MenuScene, GameScene],
+  scene: [MenuScene, GameScene, BazaarScene],
 });
+
+// A handle for headless playtests (scripts drive the scenes through it); nothing in the game reads it.
+(window as unknown as { snakeSong: Phaser.Game }).snakeSong = game;

@@ -8,10 +8,10 @@ import { createGame, setHeld, step } from '../src/model/game';
 
 const CASUAL = { ...CONFIG, bot: { ...CONFIG.bot, reactMs: 650, slackS: 0.2 } };
 
-function play(seed: number, who: 'idle' | 'bot' | 'casual') {
+function play(seed: number, who: 'idle' | 'bot' | 'casual' | 'night') {
   const bot = who !== 'idle';
   const cfg = who === 'casual' ? CASUAL : CONFIG;
-  const s = createGame(seed, CONFIG);
+  const s = createGame(seed, CONFIG, 1, who === 'night');
   const dt = 1000 / 60;
   let think = 0;
   while (!s.over && s.elapsed < 900_000) {
@@ -23,18 +23,25 @@ function play(seed: number, who: 'idle' | 'bot' | 'casual') {
     step(s, dt, CONFIG);
     s.events = [];
   }
-  return { secs: Math.round(s.elapsed / 1000), score: s.score, level: s.level, charmed: s.charmed, saves: s.saves };
+  return {
+    secs: Math.round(s.elapsed / 1000),
+    score: s.score,
+    level: s.level,
+    charmed: s.charmed,
+    saves: s.saves,
+    flowers: s.flowers,
+  };
 }
 
 it('sim', { timeout: 120_000 }, () => {
-  for (const who of ['idle', 'casual', 'bot'] as const) {
+  for (const who of ['idle', 'casual', 'bot', 'night'] as const) {
     const games = Array.from({ length: 12 }, (_, i) => play(i + 1, who));
-    const avg = (k: 'secs' | 'score' | 'level' | 'charmed' | 'saves') =>
+    const avg = (k: 'secs' | 'score' | 'level' | 'charmed' | 'saves' | 'flowers') =>
       Math.round(games.reduce((a, g) => a + g[k], 0) / games.length);
     const line = `${who.padEnd(6)}  secs ${avg('secs')}  score ${avg('score')}  level ${avg('level')}`;
     process.stderr.write(
-      `${line}  charmed ${avg('charmed')}  saves ${avg('saves')}  (secs: ${games.map((g) => g.secs).join(', ')}; ` +
-        `levels: ${games.map((g) => g.level).join(', ')})\n`,
+      `${line}  charmed ${avg('charmed')}  saves ${avg('saves')}  flowers ${avg('flowers')}  ` +
+        `(secs: ${games.map((g) => g.secs).join(', ')}; levels: ${games.map((g) => g.level).join(', ')})\n`,
     );
   }
 });

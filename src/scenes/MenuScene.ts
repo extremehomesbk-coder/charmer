@@ -1,9 +1,12 @@
 import Phaser from 'phaser';
 import { buildArt, vineCurve } from '../art';
+import { Sound } from '../audio';
 import { CONFIG } from '../config';
-import { loadSave } from '../storage';
-import { designCamera, gradientFill, label } from '../ui';
-import { POT_TOP, laneX } from './GameScene';
+import { claimDaily, dailyReward, dailyStreakIfClaimed, dayKey, tamedKinds, type Theme } from '../meta';
+import type { SnakeKind } from '../model/game';
+import { loadSave, writeSave, type SaveData } from '../storage';
+import { button, designCamera, flowerPill, gradientFill, label, panel } from '../ui';
+import { POT_TOP, laneX, weather } from './GameScene';
 
 const L = CONFIG.layout;
 const A = CONFIG.art;
@@ -23,46 +26,47 @@ interface MenuSnake {
   phase: number;
 }
 
-/** Title screen: dusk over the bazaar, a snake swaying up out of its pot to the pungi, two more peeking. */
+/**
+ * Title screen: the bazaar at dusk (or the theme in use), the tamed snakes swaying out of their pots, the
+ * wallet, the daily pouch, and the way into the game and the bazaar.
+ */
 export class MenuScene extends Phaser.Scene {
   private snakes: MenuSnake[] = [];
   private pungi!: Phaser.GameObjects.Image;
+  private save!: SaveData;
+  private wallet!: ReturnType<typeof flowerPill>;
+  private sfx = new Sound();
 
   constructor() {
     super('menu');
   }
 
   create(): void {
-    if (new URLSearchParams(window.location.search).get('auto') === '1') {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('auto') === '1') {
       this.scene.start('game', { auto: true }); // ?auto=1 goes straight to the demo
       return;
     }
+    this.save = loadSave();
+    this.sfx.setMuted(this.save.settings.muted === true);
     buildArt(this);
     designCamera(this);
     const { width } = L;
     const cx = width / 2;
     const img = (x: number, y: number, key: string) => this.add.image(x, y, key).setScale(1 / R);
-    img(0, 0, 'bg').setOrigin(0);
-    this.add.particles(0, 0, 'spark', {
-      x: { min: 0, max: width },
-      y: { min: 300, max: L.rimY },
-      lifespan: 6000,
-      speedY: { min: -10, max: -3 },
-      speedX: { min: -8, max: 8 },
-      scale: { start: 0.25, end: 0.05 },
-      alpha: { start: 0.9, end: 0 },
-      tint: [0xfff3a0, 0xffd27a, 0xb8ff9a],
-      frequency: 300,
-      blendMode: Phaser.BlendModes.ADD,
-    });
+    const theme = this.save.theme as Theme;
+    img(0, 0, `bg_${theme}`).setOrigin(0);
+    weather(this, theme, 1);
 
+    // tamed snakes on the rug (the three starter breeds until any is tamed)
     this.snakes = [];
-    const pots: [number, string, boolean][] = [
-      [1, 'gold', false],
-      [2, 'green', true],
-      [3, 'sleepy', false],
-    ];
-    for (const [lane, kind, hero] of pots) {
+    const tamed = tamedKinds(this.save);
+    const shown: SnakeKind[] = tamed.length ? tamed.slice(0, 5) : ['gold', 'green', 'sleepy'];
+    const first = Math.floor((5 - shown.length) / 2);
+    const heroIdx = Math.floor(shown.length / 2);
+    shown.forEach((kind, i) => {
+      const lane = first + i;
+      const hero = i === heroIdx;
       const x = laneX(lane);
       img(x, L.rimY + 78, 'potShadow');
       img(x, POT_TOP, `potBack_${kind}`).setOrigin(0.5, 0);
@@ -73,11 +77,13 @@ export class MenuScene extends Phaser.Scene {
       const head = part(`head_${kind}`, 0, -2).setOrigin(0.5, 0);
       const eyes = [-1, 1].map((s) => part('eye', s * 8.5, 15));
       const pupils = [-1, 1].map((s) => part('pupil', s * 8.5, 15.5));
-      const lids = kind === 'sleepy' ? [-1, 1].map((s) => part('eyelid_sleepy', s * 8.5, 10.5)) : [];
-      const box = this.add.container(x, L.rimY, [hood, head, ...eyes, ...pupils, ...lids]);
+      const extras: Phaser.GameObjects.Image[] = [];
+      if (kind === 'sleepy') extras.push(...[-1, 1].map((s) => part('eyelid_sleepy', s * 8.5, 10.5)));
+      if (kind === 'king') extras.push(part('crown', 0, -2).setOrigin(0.5, 1));
+      const box = this.add.container(x, L.rimY, [hood, head, ...eyes, ...pupils, ...extras]);
       img(x, POT_TOP, `potFront_${kind}`).setOrigin(0.5, 0);
       this.snakes.push({ x, rope, box, hood, pupils, eyes, kind, hero, phase: lane * 1.7 });
-    }
+    });
     img(0, L.vineY - 35, 'vine').setOrigin(0);
     for (const [lane, kind] of [
       [0, 'green'],
@@ -86,7 +92,7 @@ export class MenuScene extends Phaser.Scene {
       const x = laneX(lane);
       img(x, L.vineY - 35 + vineCurve(x) - 2, `bloom_${kind}`).setAngle(20);
     }
-    this.pungi = img(cx, L.fluteY - 22, 'pungi').setOrigin(0.5, 0);
+    this.pungi = img(cx, L.fluteY - 22, `pungi_${this.save.pungi}`).setOrigin(0.5, 0);
     this.add.particles(0, 0, 'note', {
       x: { min: cx - 6, max: cx + 6 },
       y: L.fluteY - 18,
@@ -100,7 +106,18 @@ export class MenuScene extends Phaser.Scene {
       frequency: 220,
     });
 
-    const title = label(this, cx, 252, 'SNAKE\nSONG', 64, { stroke: 10, shadow: true }).setOrigin(0.5);
+    // top bar: wallet, streak
+    this.wallet = flowerPill(this, 60, L.safeTop + 18, 2);
+    this.wallet.set(this.save.flowers);
+    if (this.save.daily.streak > 0) {
+      const streak = label(this, width - 16, L.safeTop + 18, `DAY ${this.save.daily.streak} STREAK`, 12, {
+        color: '#ffe3a8',
+        stroke: 4,
+      }).setOrigin(1, 0.5);
+      streak.setDepth(2);
+    }
+
+    const title = label(this, cx, 232, 'SNAKE\nSONG', 64, { stroke: 10, shadow: true }).setOrigin(0.5);
     title.setLineSpacing(-16);
     gradientFill(title, '#fff6c9', '#ff9a2e');
     this.tweens.add({
@@ -111,52 +128,169 @@ export class MenuScene extends Phaser.Scene {
       duration: 1600,
       ease: 'Sine.easeInOut',
     });
+    const best = this.save.best;
+    if (best > 0) label(this, cx, 300, `BEST ${best}`, 15, { color: '#ffe3a8', stroke: 4 }).setOrigin(0.5);
 
-    const panel = this.add.graphics();
-    panel.fillStyle(0x1a0b2e, 0.62).fillRoundedRect(22, 344, width - 44, 112, 18);
-    panel.lineStyle(1.5, 0xffd27a, 0.5).strokeRoundedRect(22, 344, width - 44, 112, 18);
+    const pan = this.add.graphics();
+    pan.fillStyle(0x1a0b2e, 0.62).fillRoundedRect(22, 322, width - 44, 92, 18);
+    pan.lineStyle(1.5, 0xffd27a, 0.5).strokeRoundedRect(22, 322, width - 44, 92, 18);
     const rules = [
-      'Hold under a pot: the pungi charms its',
-      'snake up to the vine and the pot is gone.',
-      'Lids drop! A raised snake knocks them back.',
-      'A lid that lands brings another pot.',
+      'Hold under a pot: the pungi charms its snake up',
+      'to the vine. Lids drop! A raised snake knocks',
+      'them back. A lid that lands brings another pot.',
     ];
     rules.forEach((line, i) =>
-      label(this, cx, 356 + i * 23, line, 15, { color: i === 2 ? '#bff6ff' : '#fff1d6', stroke: 4 }).setOrigin(0.5, 0),
+      label(this, cx, 334 + i * 24, line, 14, { color: i === 1 ? '#bff6ff' : '#fff1d6', stroke: 4 }).setOrigin(0.5, 0),
     );
 
-    const btnY = 506;
-    const btn = this.add.graphics();
-    btn.fillStyle(0x7a2e0e, 1).fillRoundedRect(cx - 110, btnY - 26, 220, 60, 30);
-    btn.fillStyle(0xff9a2e, 1).fillRoundedRect(cx - 110, btnY - 30, 220, 58, 29);
-    btn.fillStyle(0xffffff, 0.28).fillRoundedRect(cx - 100, btnY - 26, 200, 18, 9);
-    btn.lineStyle(3, 0xfff1c2, 1).strokeRoundedRect(cx - 110, btnY - 30, 220, 58, 29);
-    const play = label(this, cx, btnY - 1, 'PLAY', 30, { stroke: 6 }).setOrigin(0.5);
+    button(this, cx, 466, 220, 58, 'PLAY', () => this.go(false), { size: 30 });
+    button(this, cx - 78, 530, 140, 46, 'BAZAAR', () => this.bazaar('pungi'), {
+      size: 17,
+      fill: 0x5a3a8a,
+      icon: 'flower',
+    });
+    button(this, cx + 78, 530, 140, 46, 'SNAKES', () => this.bazaar('snakes'), { size: 17, fill: 0x5a3a8a });
+    const demo = label(this, cx, 584, 'watch a demo', 14, { color: '#e7c9ff', stroke: 4 })
+      .setOrigin(0.5)
+      .setPadding(30, 10, 30, 10)
+      .setInteractive({ useHandCursor: true });
+    demo.on('pointerup', () => this.go(true));
+    this.input.keyboard?.once('keydown-SPACE', () => this.go(false));
+    this.input.keyboard?.once('keydown-ENTER', () => this.go(false));
+
+    if (params.get('stats') === '1') {
+      const s = this.save.stats;
+      label(
+        this,
+        cx,
+        L.height - L.safeBottom - 4,
+        `runs ${s.runs} · continue offers ${s.offers} · taken ${s.continues} · bazaar visits ${s.bazaar}`,
+        11,
+        { color: '#e7c9ff', stroke: 3 },
+      ).setOrigin(0.5, 1);
+    }
+
+    const streakIf = dailyStreakIfClaimed(this.save, dayKey(new Date()));
+    if (streakIf > 0) this.time.delayedCall(500, () => this.dailyPouch(streakIf));
+    this.cameras.main.fadeIn(200, 18, 8, 40);
+  }
+
+  private go(auto: boolean): void {
+    this.input.removeAllListeners();
+    this.cameras.main.fadeOut(200, 18, 8, 40);
+    this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('game', { auto }));
+  }
+
+  private bazaar(tab: 'pungi' | 'theme' | 'snakes'): void {
+    this.input.removeAllListeners();
+    this.cameras.main.fadeOut(180, 18, 8, 40);
+    this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('bazaar', { tab }));
+  }
+
+  /** The daily pouch: a popup with today's flowers, claimed with one tap. */
+  private dailyPouch(streak: number): void {
+    const cx = L.width / 2;
+    const cy = 430;
+    const depth = 10;
+    const dim = this.add
+      .rectangle(cx, L.height / 2, L.width, L.height, 0x0c0420, 0.6)
+      .setDepth(depth)
+      .setInteractive();
+    const card = panel(this, cx, cy, 300, 320, depth + 1);
+    const parts: Phaser.GameObjects.GameObject[] = [dim, card];
+    const t = label(this, cx, cy - 122, 'DAILY POUCH', 28, { stroke: 6, shadow: true })
+      .setOrigin(0.5)
+      .setDepth(depth + 2);
+    gradientFill(t, '#fff6c9', '#ff9a2e');
+    const pouch = this.add
+      .image(cx, cy - 40, 'pouch')
+      .setScale(1.3 / R)
+      .setDepth(depth + 2);
     this.tweens.add({
-      targets: [play],
-      scale: { from: 1, to: 1.08 },
+      targets: pouch,
+      angle: { from: -6, to: 6 },
       yoyo: true,
       repeat: -1,
-      duration: 600,
+      duration: 500,
       ease: 'Sine.easeInOut',
     });
-    const best = loadSave().best;
-    if (best > 0) label(this, cx, 318, `BEST ${best}`, 15, { color: '#ffe3a8', stroke: 4 }).setOrigin(0.5);
-    const demo = label(this, cx, 560, 'watch a demo', 14, { color: '#e7c9ff', stroke: 4 })
+    const d = CONFIG.meta.daily;
+    const flowers = dailyReward(streak) + (streak % d.streakDays === 0 ? d.streakBonus : 0);
+    const day = label(this, cx, cy + 22, `day ${streak} of ${d.streakDays}`, 15, { color: '#e7c9ff', stroke: 4 })
       .setOrigin(0.5)
-      .setPadding(30, 10, 30, 10);
-
-    const go = (auto: boolean) => {
-      this.input.removeAllListeners();
-      this.cameras.main.fadeOut(200, 18, 8, 40);
-      this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('game', { auto }));
-    };
-    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
-      const onDemo = demo.getBounds().contains(p.worldX, p.worldY);
-      go(onDemo);
-    });
-    this.input.keyboard?.once('keydown-SPACE', () => go(false));
-    this.input.keyboard?.once('keydown-ENTER', () => go(false));
+      .setDepth(depth + 2);
+    const amount = label(this, cx + 10, cy + 54, `+${flowers}`, 30, { stroke: 6 })
+      .setOrigin(0.5)
+      .setDepth(depth + 2);
+    gradientFill(amount, '#fff7d6', '#ffc23d');
+    const icon = this.add
+      .image(cx - amount.width / 2 - 8, cy + 54, 'flower')
+      .setScale(1.1 / R)
+      .setDepth(depth + 2);
+    const note = label(
+      this,
+      cx,
+      cy + 88,
+      streak % d.streakDays === 0
+        ? 'A FULL WEEK: a ruby racer joins you!'
+        : `come back tomorrow for +${dailyReward(streak + 1)}`,
+      12,
+      { color: '#ffe3c2', stroke: 3 },
+    )
+      .setOrigin(0.5)
+      .setDepth(depth + 2);
+    parts.push(t, pouch, day, amount, icon, note);
+    const claim = button(
+      this,
+      cx,
+      cy + 130,
+      180,
+      48,
+      'CLAIM',
+      () => {
+        const reward = claimDaily(this.save, dayKey(new Date()));
+        if (!reward) return;
+        this.save = reward.save;
+        writeSave(this.save);
+        claim.setEnabled(false);
+        dim.disableInteractive(); // taps pass through while the pouch fades
+        this.sfx.coins(6);
+        // flowers fly from the pouch to the wallet
+        const target = this.wallet.iconAt();
+        for (let i = 0; i < Math.min(8, Math.ceil(reward.flowers / 5)); i++) {
+          const f = this.add
+            .image(pouch.x + Phaser.Math.Between(-20, 20), pouch.y, 'flower')
+            .setScale(1 / R)
+            .setDepth(depth + 3);
+          this.tweens.add({
+            targets: f,
+            x: target.x,
+            y: target.y,
+            scale: 0.5 / R,
+            delay: i * 60,
+            duration: 550,
+            ease: 'Cubic.easeIn',
+            onComplete: () => {
+              f.destroy();
+              this.wallet.set(this.save.flowers, true);
+            },
+          });
+        }
+        this.time.delayedCall(700, () => {
+          this.tweens.add({
+            targets: parts,
+            alpha: 0,
+            duration: 250,
+            onComplete: () => {
+              parts.forEach((p) => p.destroy());
+              claim.destroy();
+              if (reward.rare) this.scene.restart(); // the new snake takes its place on the rug
+            },
+          });
+        });
+      },
+      { size: 22, depth: depth + 2 },
+    );
   }
 
   update(time: number): void {
@@ -183,7 +317,8 @@ export class MenuScene extends Phaser.Scene {
       s.rope.setPoints(pts);
       const slope = (sway(1) - sway(0.94)) / (0.06 * len);
       s.box.setPosition(s.x + sway(1), top).setRotation(Math.atan(slope) * 0.6);
-      s.hood.setScale((s.hero ? 1 : 0.4) / R, (s.hero ? 1 : 0.78) / R);
+      const big = s.kind === 'king' ? 1.15 : 1;
+      s.hood.setScale(((s.hero ? 1 : 0.4) * big) / R, ((s.hero ? 1 : 0.78) * big) / R);
       const blink = Math.sin(t * 1.3 + s.phase * 3) > 0.985 ? 0.12 : 1;
       s.eyes.forEach((e) => e.setScale(1 / R, blink / R));
       s.pupils.forEach((p, i) =>
